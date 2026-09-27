@@ -1065,7 +1065,8 @@ function splitTextComments(element) {
   if (!Array.isArray(element.children)) return;
   const children = [];
   for (const child of element.children) {
-    const text = child?.type === "JSXText" && child.value === child.raw ? child.raw : "";
+    // Core keeps entities as written in `value`, so each piece's `value` is its `raw`.
+    const text = child?.type === "JSXText" && typeof child.raw === "string" ? child.raw : "";
     const piece = (start, end) => {
       const value = text.slice(start, end);
       return { type: "JSXText", start: child.start + start, end: child.start + end, value, raw: value };

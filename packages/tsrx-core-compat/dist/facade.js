@@ -857,7 +857,7 @@ function splitTextComments(element) {
 	if (!Array.isArray(element.children)) return;
 	const children = [];
 	for (const child of element.children) {
-		const text = child?.type === "JSXText" && child.value === child.raw ? child.raw : "";
+		const text = child?.type === "JSXText" && typeof child.raw === "string" ? child.raw : "";
 		const piece = (start, end) => {
 			const value = text.slice(start, end);
 			return {

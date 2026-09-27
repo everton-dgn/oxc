@@ -85,6 +85,11 @@ test("#118: an element's children have TSX's shape, with each comment an empty {
       [[["see http://", 29, 40], "b", [" a//b ", 48, 54], ["{}", 54, 61], ["// b &#47;* c", 61, 74]], [["x", 43, 44]]],
     ],
     [
+      "const x = <p>a &amp; /* c */ b &#47;/ d</p>;",
+      "App.jsx",
+      [[["a &amp; ", 13, 21], ["{}", 21, 28], [" b &#47;/ d", 28, 39]]],
+    ],
+    [
       "const x = <p>\n  a /* c */ b\n  // d\n</p>;",
       "App.tsx",
       [[["\n  a ", 13, 18], ["{}", 18, 25], [" b\n  ", 25, 30], ["{}", 30, 34], ["\n", 34, 35]]],
