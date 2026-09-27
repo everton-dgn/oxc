@@ -145,10 +145,21 @@ export function parse_style(content, location, options) {
     source: content,
     hash: `tsrx-${strong_hash(hash_source)}`,
     type: "StyleSheet",
-    children: read_body(parser),
+    children: read_css_body(parser),
     start: 0,
     end: content.length,
   };
+}
+
+// A CSS syntax error gets `@tsrx/core`'s code for it.
+/** @param {Parser} parser */
+function read_css_body(parser) {
+  try {
+    return read_body(parser);
+  } catch (error) {
+    if (error instanceof Error && !("code" in error)) Object.assign(error, { code: "TSRX3013" });
+    throw error;
+  }
 }
 
 /** @param {Parser} parser */

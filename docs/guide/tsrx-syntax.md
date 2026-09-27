@@ -100,8 +100,8 @@ As in `@tsrx/core` 0.5, a tag expression is one of three forms: an identifier
 (`Tag`), a member access (`props.as`, `this.tag`, `registry[name]`,
 `items[0]`), or a string literal (`'section'`). Anything else, such as
 `c ? A : B`, `tag as any`, `props?.as`, or a call, still parses, but it is
-reported with the code `tsrx-dynamic-tag-expression`. A normal parse throws
-that error, and `collect` and `loose` mode record it and keep the tree.
+reported with the code `TSRX2014`, as `@tsrx/core` reports it. A normal parse
+throws that error, and `collect` and `loose` mode record it and keep the tree.
 `oxc-tsrx lint` and the editor report it as an error on the expression, and
 still lint and format the rest of the file. To fix it, compute the tag above the
 element (`const Tag = c ? A : B;`) and write `<{Tag} />`.
@@ -147,7 +147,7 @@ child, then writes it back without the braces.
 To write the characters as text, escape one of them: `&#47;*` or `&#47;&#47;`.
 A comment that runs over its element's closing tag, such as `<p>// note</p>`,
 leaves the element open until the `}` that closes the template, which is
-reported as `Unclosed tag '<p>'` (code `tsrx-unclosed-tag`).
+reported as `Unclosed tag '<p>'` (code `TSRX1001`).
 
 ## Protected regions
 

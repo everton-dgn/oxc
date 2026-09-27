@@ -132,18 +132,61 @@ function parserOptions(filename, eagerTsrx = false) {
 // the parse in every mode, as core's acorn raise does, with the same message and a `(line:column)`.
 const DYNAMIC_TAG_REFERENCE_MESSAGE =
   "A dynamic tag expression must be an identifier, a member access such as `props.as` or `registry[name]`, or a string literal. Compute anything else before the element: `const Tag = c ? Child : Fallback;`, then `<{Tag} />`.";
-const DYNAMIC_TAG_EXPRESSION_CODE = "tsrx-dynamic-tag-expression";
 const DYNAMIC_TAG_NOT_EXPRESSION_MESSAGE =
   /^malformed TSRX at byte \d+: expected a valid dynamic JSX tag expression$/u;
 // `@tsrx/core` 0.5 reads a JavaScript comment in JSX text as a comment, so one can swallow an
 // element's closing tag (`<p>// c</p>`). Core then ends the element at the `}` that closes the
 // template and reports it as unclosed: a strict parse raises it through acorn, with the position
-// appended to the message and no code, and `collect`/`loose` record it with a code and keep the
-// tree. When a block comment runs to the end of the source instead, a strict parse raises the
-// same message there, and a collecting parse goes on to fail on the missing `}`.
+// appended to the message, and `collect`/`loose` record it and keep the tree. When a block
+// comment runs to the end of the source instead, a strict parse raises the same message there,
+// and a collecting parse goes on to fail on the missing `}`.
 const UNCLOSED_TAG_MESSAGE =
   /^Unclosed tag '<[^'\r\n]*>'\. Expected '<\/[^'\r\n]*>' before end of template\.$/u;
-const UNCLOSED_TAG_CODE = "tsrx-unclosed-tag";
+// Each error's code, as `@tsrx/core` assigns it: TypeScript's code for a mistake TypeScript also
+// reports, and a TSRX code for one only TSRX reports. An OXC diagnostic with a TypeScript code
+// prints it at the head of its codeframe (`x TS(1029): …`). The rest are matched by message:
+// this package's own errors, the TSRX scanner's, and the OXC ones that carry no code. A message
+// matched here wins over OXC's code, which differs from TypeScript's for a parameter property.
+const OXC_CODE = /^\s*\S+ TS\((\d+)\): /u;
+const MESSAGE_CODES: Array<[RegExp, string]> = [
+  [/^Unclosed tag |^unterminated JSX element /u, "TSRX1001"],
+  [/: expected a (?:matching (?:dynamic )?JSX closing tag|fragment closing tag `<\/>`)$/u, "TSRX1002"],
+  [/: expected a braced control-flow body$/u, "TSRX1008"],
+  [/: expected `@(?:else|empty|pending|catch)`$/u, "TSRX1009"],
+  [/: expected an `@pending` or `@catch` clause$/u, "TSRX1010"],
+  [/: expected (?:an identifier after `index`|one `index` annotation before `key`)$/u, "TSRX1011"],
+  [/^A code block renders a single node; /u, "TSRX2011"],
+  [/^render expression precedes another statement$/u, "TSRX2012"],
+  [/^A dynamic tag expression must be /u, "TSRX2014"],
+  [/^(?:Identifier|type) '[^']+' has already been declared|^Argument name clash$/u, "TS2300"],
+  [/^Export '[^']+' is not defined$/u, "TS2304"],
+  [/^'(?:public|private|protected|readonly|override)' modifier cannot appear on a parameter\.$/u, "TS2369"],
+  [/^'[^']+' expected\.$|^Expected `[^`]*` but found |^Expected a semicolon /u, "TS1005"],
+  [/^Unexpected token$/u, "TS1012"],
+  [/^Unexpected token\. Did you mean `\{'\}'\}`/u, "TS1381"],
+  [/^Unexpected token\. Did you mean `\{'>'\}`/u, "TS1382"],
+  [/^Unterminated string$|^unterminated quoted string /u, "TS1002"],
+  [/^Unterminated multiline comment$|^unterminated block comment /u, "TS1010"],
+  [/^Unterminated regular expression$|^unterminated regular expression literal /u, "TS1161"],
+  [/^unterminated template literal /u, "TS1160"],
+  [/^Missing initializer in const declaration$|^Using declarations must have an initializer\.$/u, "TS1155"],
+  [/^Missing initializer in destructuring declaration$/u, "TS1182"],
+  [/^A rest parameter or binding pattern may not have a trailing comma\.$/u, "TS1013"],
+  [/^A 'get' accessor must not have any formal parameters\.$/u, "TS1054"],
+  [/^Invalid optional chain from new expression\.$/u, "TS1209"],
+  [/^Logical expressions and coalesce expressions cannot be mixed$/u, "TS5076"],
+  [/^Missing catch or finally clause$/u, "TS1472"],
+  [/^Illegal newline after /u, "TS1142"],
+  [/^Unexpected flag .+ in regular expression literal$/u, "TS1499"],
+  [/^Flag .+ is mentioned twice in regular expression literal$/u, "TS1500"],
+  [/^Invalid characters after number$/u, "TS1351"],
+  [/^Only string literals are allowed as module attribute values\.$/u, "TS2858"],
+  [/^`await` is only allowed within async functions and at the top levels of modules/u, "TS1308"],
+  [/^'with' statements are not allowed$/u, "TS1101"],
+  [/^Illegal break statement$/u, "TS1105"],
+  [/^Illegal continue statement/u, "TS1104"],
+  [/^'0'-prefixed octal literals /u, "TS1124"],
+];
 const IDENTIFIER_START = /[$_\p{ID_Start}]/u;
 const IDENTIFIER_CONTINUE = /[$_\u200c\u200d\p{ID_Continue}]/u;
 const WHITESPACE = /\s/u;
@@ -319,36 +362,30 @@ function isDynamicTagNotExpression(error) {
   return typeof error?.message === "string" && DYNAMIC_TAG_NOT_EXPRESSION_MESSAGE.test(error.message);
 }
 
-// Core raises `<{...a} />` and `<{} />` through acorn: `pos`, a `{ line, column }` `loc`, and
-// `raisedAt`, with the position appended to the message and no `end`, `code`, or `type`.
+// Core raises `<{...a} />` and `<{} />` through acorn.
 function dynamicTagNotExpressionError(error, positionAt) {
   const { start, end } = primarySpan(error);
-  const loc = positionAt(start);
-  const raised = new SyntaxError(
-    `${DYNAMIC_TAG_REFERENCE_MESSAGE} (${loc.line}:${loc.column})`,
-  ) as SyntaxError & { pos?: number; loc?: unknown; raisedAt?: number };
-  raised.pos = start;
-  raised.loc = loc;
-  raised.raisedAt = end;
-  return raised;
+  return acornRaise(DYNAMIC_TAG_REFERENCE_MESSAGE, start, positionAt, end);
 }
 
 function isUnclosedTag(error) {
   return typeof error?.message === "string" && UNCLOSED_TAG_MESSAGE.test(error.message);
 }
 
-// An error raised as acorn raises it: `pos`, a `{ line, column }` `loc`, and `raisedAt`, with the
-// position appended to the message and no `end`, `code`, or `type`.
-function acornRaise(message, start, positionAt) {
+// An error raised as acorn raises it: `code`, `pos`, a `{ line, column }` `loc`, and `raisedAt`,
+// with the position appended to the message and no `end` or `type`.
+function acornRaise(message, start, positionAt, raisedAt = start) {
   const loc = positionAt(start);
   const raised = new SyntaxError(`${message} (${loc.line}:${loc.column})`) as SyntaxError & {
+    code?: string;
     pos?: number;
     loc?: unknown;
     raisedAt?: number;
   };
+  raised.code = compatibleDiagnosticCode(null, message);
   raised.pos = start;
   raised.loc = loc;
-  raised.raisedAt = start;
+  raised.raisedAt = raisedAt;
   return raised;
 }
 
@@ -363,8 +400,9 @@ function unclosedTagFailure(error, collecting, positionAt, source) {
 
 function compatibleDiagnosticCode(error, message) {
   if (typeof error?.code === "string") return error.code;
-  if (UNCLOSED_TAG_MESSAGE.test(message)) return UNCLOSED_TAG_CODE;
-  return message === DYNAMIC_TAG_REFERENCE_MESSAGE ? DYNAMIC_TAG_EXPRESSION_CODE : undefined;
+  const code = MESSAGE_CODES.find(([pattern]) => pattern.test(message))?.[1];
+  const oxc = OXC_CODE.exec(error?.codeframe ?? "");
+  return code ?? (oxc === null ? undefined : `TS${oxc[1]}`);
 }
 
 function toCompileError(error, filename, positionAt, type, source) {
@@ -2099,16 +2137,7 @@ function scopeDiagnostics(program, source) {
 // character wide at the redeclared name.
 function scopeFatalError(error, filename, positionAt) {
   const fatal = error.compatFatal;
-  if (fatal.raise) {
-    const loc = positionAt(fatal.start);
-    const raised = new SyntaxError(
-      `${error.message} (${loc.line}:${loc.column})`,
-    ) as SyntaxError & { pos?: number; loc?: unknown; raisedAt?: number };
-    raised.pos = fatal.start;
-    raised.loc = loc;
-    raised.raisedAt = fatal.raisedAt;
-    return raised;
-  }
+  if (fatal.raise) return acornRaise(error.message, fatal.start, positionAt, fatal.raisedAt);
   return toCompileError(
     { message: error.message, labels: [{ start: fatal.start, end: fatal.end }] },
     filename,
@@ -2148,7 +2177,7 @@ function mergeBySourceOrder(left, right) {
 // `</script` in any letter case (`</SCRIPT>`, `</scripts>`, `</script/>`) is left in `content`,
 // and core reports each one, 8 characters wide, as a recoverable error.
 const SCRIPT_END_TAG_START = /<\/script/giu;
-const SCRIPT_END_TAG_IN_BODY_CODE = "tsrx-script-end-tag-in-body";
+const SCRIPT_END_TAG_IN_BODY_CODE = "TSRX1004";
 
 function mayHaveScriptEndTagInBody(source) {
   if (typeof source !== "string") return false;

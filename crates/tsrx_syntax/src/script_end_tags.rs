@@ -8,7 +8,7 @@
 use crate::{ByteSpan, OverlayView};
 
 /// `@tsrx/core`'s diagnostic code for a `</script` inside a `<script>` body.
-pub const SCRIPT_END_TAG_IN_BODY_CODE: &str = "tsrx-script-end-tag-in-body";
+pub const SCRIPT_END_TAG_IN_BODY_CODE: &str = "TSRX1004";
 
 /// One `</script` written inside a raw `<script>` body, in authored bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

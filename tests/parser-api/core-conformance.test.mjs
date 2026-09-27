@@ -4,7 +4,7 @@ import test from "node:test";
 import { parseModule } from "../../packages/tsrx-core-compat/dist/index.js";
 
 // Regression tests for the @tsrx/core 0.5.0 conformance issues tsrx-org/oxc #110, #112, #113,
-// #114, #115, #116, #118, #125, #127, and #128. Every expected value below is what @tsrx/core 0.5.0 (tsrx main at
+// #114, #115, #116, #117, #118, #125, #127, and #128. Every expected value below is what @tsrx/core 0.5.0 (tsrx main at
 // f78fada) returns for the same source, so a difference here is a difference from the reference
 // parser.
 
@@ -136,7 +136,7 @@ test("#118: collect mode records an unclosed element whose text holds a comment"
     parseModule(source, "App.tsrx", { collect: true, errors });
     assert.deepEqual(
       errors.map(({ message, code }) => [message, code]),
-      [["Unclosed tag '<p>'. Expected '</p>' before end of template.", "tsrx-unclosed-tag"]],
+      [["Unclosed tag '<p>'. Expected '</p>' before end of template.", "TSRX1001"]],
       source,
     );
   }
@@ -194,7 +194,7 @@ test("#110: a comment that swallows a closing tag leaves the element unclosed, a
     try {
       parseModule(source, "App.tsrx", { collect: true, errors });
     } catch (error) {
-      return ["throws", error.message, error.pos];
+      return ["throws", error.message, error.pos, error.code];
     }
     return errors.map((error) => [error.message, error.pos, error.code]);
   };
@@ -203,21 +203,21 @@ test("#110: a comment that swallows a closing tag leaves the element unclosed, a
     ["export function App() @{\n\t<p>// c</p>\n}", 38],
     ["export function App() {\n\treturn <p>// c</p>;\n}", 45],
   ]) {
-    assert.deepEqual(strict(source), [`${unclosed("p")} (3:0)`, pos, null, [3, 0]], source);
-    assert.deepEqual(collected(source), [[unclosed("p"), pos, "tsrx-unclosed-tag"]], source);
+    assert.deepEqual(strict(source), [`${unclosed("p")} (3:0)`, pos, "TSRX1001", [3, 0]], source);
+    assert.deepEqual(collected(source), [[unclosed("p"), pos, "TSRX1001"]], source);
   }
   const nested = "export function App() @{\n\t<div><p>// c</p></div>\n}";
   assert.deepEqual(collected(nested), [
-    [unclosed("p"), 49, "tsrx-unclosed-tag"],
-    [unclosed("div"), 49, "tsrx-unclosed-tag"],
+    [unclosed("p"), 49, "TSRX1001"],
+    [unclosed("div"), 49, "TSRX1001"],
   ]);
   // A block comment with no end runs to the end of the source.
   for (const [source, pos] of [
     ["export function App() @{\n\t<p>a /* open\n\t\tb</p>\n}", 48],
     ["export function App() {\n\treturn <p>a /* open\n\t\tb</p>;\n}", 55],
   ]) {
-    assert.deepEqual(strict(source), [`${unclosed("p")} (4:1)`, pos, null, [4, 1]], source);
-    assert.deepEqual(collected(source), ["throws", "'}' expected. (4:1)", pos], source);
+    assert.deepEqual(strict(source), [`${unclosed("p")} (4:1)`, pos, "TSRX1001", [4, 1]], source);
+    assert.deepEqual(collected(source), ["throws", "'}' expected. (4:1)", pos, "TS1005"], source);
   }
 });
 
@@ -295,7 +295,7 @@ test("#116: a script body ends at </script, HTML whitespace, and >", () => {
   }
 });
 
-test("#116: any other </script in a script body is tsrx-script-end-tag-in-body", () => {
+test("#116: any other </script in a script body is TSRX1004", () => {
   const message = (written) =>
     `'${written}' can end a script in HTML, so a '<script>' body can't contain it. Write '<\\/${written.slice(2)}' instead.`;
   const cases = [
@@ -310,7 +310,7 @@ test("#116: any other </script in a script body is tsrx-script-end-tag-in-body",
       () => parseModule(source, "App.tsrx"),
       (error) => {
         assert.equal(error.message, message(written));
-        assert.equal(error.code, "tsrx-script-end-tag-in-body");
+        assert.equal(error.code, "TSRX1004");
         assert.deepEqual([error.pos, error.end], [45, 53]);
         return true;
       },
@@ -328,7 +328,7 @@ test("#116: any other </script in a script body is tsrx-script-end-tag-in-body",
       );
       assert.deepEqual(
         errors.map(({ message, code, pos, end }) => ({ message, code, pos, end })),
-        [{ message: message(written), code: "tsrx-script-end-tag-in-body", pos: 45, end: 53 }],
+        [{ message: message(written), code: "TSRX1004", pos: 45, end: 53 }],
         `${mode}: ${source}`,
       );
     }
@@ -344,7 +344,7 @@ test("#116: a </script in a string outside a script body is not reported", () =>
 
 const DYNAMIC_TAG_MESSAGE =
   "A dynamic tag expression must be an identifier, a member access such as `props.as` or `registry[name]`, or a string literal. Compute anything else before the element: `const Tag = c ? Child : Fallback;`, then `<{Tag} />`.";
-const DYNAMIC_TAG_CODE = "tsrx-dynamic-tag-expression";
+const DYNAMIC_TAG_CODE = "TSRX2014";
 
 const dynamicTagSource = (tag) =>
   `export function App({ tag, props, registry, name, c, A, B, Tag, getTag, getName, level, items, a }) @{\n\t<div>\n\t\t<{${tag}} />\n\t</div>\n}`;
@@ -448,6 +448,7 @@ test("#115: a spread or an empty dynamic tag is no expression and throws in ever
           assert.equal(error.message, `${DYNAMIC_TAG_MESSAGE} ${position}`);
           assert.equal(error.pos, pos);
           assert.equal(error.end, undefined);
+          assert.equal(error.code, DYNAMIC_TAG_CODE);
           return true;
         },
       );
@@ -871,4 +872,51 @@ test("#128: each arm's block is a scope of its own", () => {
   );
   const error = strictError(arm("    @case 1: {\n      const y = 1;\n      let y;\n      <b>{y}</b>\n    }"));
   assert.deepEqual([error[0], error[1]], ["Identifier 'y' has already been declared", 90]);
+});
+
+// #117: each code is the one @tsrx/core (tsrx main at 21bb71e) gives the same mistake, where the
+// messages can differ: a TSRX code for a mistake only TSRX reports, TypeScript's code otherwise.
+const ERROR_CODES = [
+  ["export function App() @{\n\t<div>\n}", "TSRX1001"],
+  ["const a = <div></span>;", "TSRX1002"],
+  ["const a = <div>@if (x) <b /></div>;", "TSRX1008"],
+  ["const a = <div>@if (x) { <b /> } else { <i /> }</div>;", "TSRX1009"],
+  ["const a = <div>@try { <b /> }</div>;", "TSRX1010"],
+  ["function App() @{\n\t@for (const x of xs; index 0) {\n\t\t<li />\n\t}\n}", "TSRX1011"],
+  ["function App() @{\n\t<a />\n\t<b />\n}", "TSRX2011"],
+  ["function App() @{\n\t<a />\n\tconst x = 1;\n}", "TSRX2012"],
+  ["function App() @{\n\t<>\n\t\t<style>p { color: red; </style>\n\t\t<p />\n\t</>\n}", "TSRX3013"],
+  ["if (a) {", "TS1005"],
+  ["let x = );", "TS1012"],
+  ["class A {\n\treadonly public x = 1;\n}", "TS1029"],
+  ["class A {\n\treadonly readonly a;\n}", "TS1030"],
+  ["let a = 1;\nlet a = 2;", "TS2300"],
+  ["function f(a, a) {}", "TS2300"],
+  ["type A = 1;\ntype A = 2;", "TS2300"],
+  ["export { missing };", "TS2304"],
+  ["a ?? b || c;", "TS5076"],
+  ["import a from 'a' with { type: 1 };", "TS2858"],
+];
+
+test("#117: an error carries the code @tsrx/core gives the same mistake", () => {
+  for (const [source, code] of ERROR_CODES) {
+    assert.throws(
+      () => parseModule(source, "App.tsrx"),
+      (error) => error.code === code,
+      `${code} ${source}`,
+    );
+  }
+  // A recorded error has its code too.
+  for (const [source, code] of [
+    ["function App() @{\n\t<a />\n\t<b />\n}", "TSRX2011"],
+    ["let a = 1;\nlet a = 2;", "TS2300"],
+    ["export function App() @{\n\t<p>// c\n}\n", "TSRX1001"],
+  ]) {
+    const errors = [];
+    parseModule(source, "App.tsrx", { collect: true, errors });
+    assert.deepEqual(errors.map((error) => error.code), [code], source);
+  }
+  // OXC gives a parameter property outside a constructor TS1090. TypeScript gives TS2369, as core
+  // does when it records the error.
+  assert.throws(() => parseModule("function f(private a) {}", "App.tsrx"), { code: "TS2369" });
 });

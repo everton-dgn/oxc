@@ -327,7 +327,7 @@ fn a_script_body_ends_where_html_ends_it() {
 #[test]
 fn other_script_end_tags_stay_in_the_body() {
     // Only a lowercase `</script` followed by whitespace and `>` ends the body. The compat facade
-    // reports these others as `tsrx-script-end-tag-in-body`, as `@tsrx/core` does.
+    // reports these others as `TSRX1004`, as `@tsrx/core` does.
     for inner in ["</SCRIPT>", "</script/>", "</scripts>", "</Script >"] {
         let source = format!(
             "export function App() @{{\n\t<div><script>a = 1;{inner}b = 2;</script></div>\n}}"

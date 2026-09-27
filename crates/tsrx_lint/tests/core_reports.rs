@@ -49,23 +49,21 @@ fn a_disallowed_dynamic_tag_expression_is_an_error_at_cores_span() {
                   \t<{'section'} />\n\
                   }\n";
     let diagnostics = lint(source);
-    let dynamic = diagnostics
-        .iter()
-        .filter(|diagnostic| diagnostic.code == "tsrx-dynamic-tag-expression")
-        .collect::<Vec<_>>();
+    let dynamic =
+        diagnostics.iter().filter(|diagnostic| diagnostic.code == "TSRX2014").collect::<Vec<_>>();
     // Core reports each opening tag once, at the part that isn't an allowed form, parentheses
     // included; the allowed forms report nothing.
     assert_eq!(
         reported(source, &dynamic),
         [
-            ("tsrx-dynamic-tag-expression".to_string(), "getTag()"),
-            ("tsrx-dynamic-tag-expression".to_string(), "props.open ? A : B"),
-            ("tsrx-dynamic-tag-expression".to_string(), "(props.as)"),
-            ("tsrx-dynamic-tag-expression".to_string(), "props.open ? <A /> : B"),
+            ("TSRX2014".to_string(), "getTag()"),
+            ("TSRX2014".to_string(), "props.open ? A : B"),
+            ("TSRX2014".to_string(), "(props.as)"),
+            ("TSRX2014".to_string(), "props.open ? <A /> : B"),
         ]
     );
     for diagnostic in &dynamic {
-        assert_eq!(diagnostic.rule, "tsrx-dynamic-tag-expression");
+        assert_eq!(diagnostic.rule, "TSRX2014");
         assert_eq!(diagnostic.severity, "error");
         assert_eq!(diagnostic.message, DYNAMIC_TAG_MESSAGE);
     }
@@ -80,16 +78,14 @@ fn a_script_end_tag_inside_a_script_body_is_an_error_at_cores_span() {
                   \t<head><script>a = 1;</SCRIPT>b = '</script/>';</Script >{count}</script></head>\n\
                   }\n";
     let diagnostics = lint(source);
-    let script = diagnostics
-        .iter()
-        .filter(|diagnostic| diagnostic.code == "tsrx-script-end-tag-in-body")
-        .collect::<Vec<_>>();
+    let script =
+        diagnostics.iter().filter(|diagnostic| diagnostic.code == "TSRX1004").collect::<Vec<_>>();
     assert_eq!(
         reported(source, &script),
         [
-            ("tsrx-script-end-tag-in-body".to_string(), "</SCRIPT"),
-            ("tsrx-script-end-tag-in-body".to_string(), "</script"),
-            ("tsrx-script-end-tag-in-body".to_string(), "</Script"),
+            ("TSRX1004".to_string(), "</SCRIPT"),
+            ("TSRX1004".to_string(), "</script"),
+            ("TSRX1004".to_string(), "</Script"),
         ]
     );
     assert_eq!(
@@ -97,7 +93,7 @@ fn a_script_end_tag_inside_a_script_body_is_an_error_at_cores_span() {
         "'</SCRIPT' can end a script in HTML, so a '<script>' body can't contain it. Write '<\\/SCRIPT' instead."
     );
     for diagnostic in &script {
-        assert_eq!(diagnostic.rule, "tsrx-script-end-tag-in-body");
+        assert_eq!(diagnostic.rule, "TSRX1004");
         assert_eq!(diagnostic.severity, "error");
     }
     assert!(diagnostics.iter().any(|diagnostic| diagnostic.rule == "no-var"), "{diagnostics:?}");
@@ -175,11 +171,11 @@ fn nested_tsrx_in_a_dynamic_tag_expression_is_reported_not_a_lint_failure() {
             let diagnostics = lint(&source);
             let dynamic = diagnostics
                 .iter()
-                .filter(|diagnostic| diagnostic.code == "tsrx-dynamic-tag-expression")
+                .filter(|diagnostic| diagnostic.code == "TSRX2014")
                 .collect::<Vec<_>>();
             assert_eq!(
                 reported(&source, &dynamic),
-                [("tsrx-dynamic-tag-expression".to_string(), expression)],
+                [("TSRX2014".to_string(), expression)],
                 "{source}"
             );
             assert!(
