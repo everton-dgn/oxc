@@ -144,3 +144,48 @@ fn a_comment_in_jsx_text_is_a_comment_to_the_lint_rules() {
         [("eslint(no-unused-vars)".to_owned(), "a"), ("eslint(no-unused-vars)".to_owned(), "b")]
     );
 }
+
+#[test]
+fn nested_tsrx_in_a_dynamic_tag_expression_is_reported_not_a_lint_failure() {
+    // Issue #123: core keeps these files and reports the whole tag expression. The lint lane must
+    // too, and still lint the rest of the file. `paired` also checks `<{e}>x</{e}>`; a closing
+    // expression holding a plain closing tag like `</B>` fails to scan in the parser lane too.
+    for (expression, paired) in [
+        ("c ? B : <{T} />", true),
+        ("c || <{T}>x</{T}>", true),
+        ("<{T} /> || c", true),
+        // Core also reports the nested `a()`; the lint lane reports the outer expression only.
+        ("() => <{a()}/>", true),
+        ("@if(ok){Tag}@else{Fallback}", true),
+        ("@for(item of items){item.Tag}@empty{Fallback}", true),
+        ("@switch(kind){@case 0:{A}@default:{B}}", true),
+        ("@try{A}@pending{B}@catch{C}", true),
+        ("ok ? @if(foo){A}@else{B} : Fallback", true),
+        ("ok ? A : <B>@if(x){<i />}</B>", false),
+        ("ok ? A : <B>@{ var x = 1; <i /> }</B>", false),
+        ("ok ? A : <script>x</script>", false),
+    ] {
+        let mut elements = vec![format!("<{{ {expression} }} />")];
+        if paired {
+            elements.push(format!("<{{{expression}}}>x</{{{expression}}}>"));
+        }
+        for element in elements {
+            let source =
+                format!("export function View(props) @{{\n\tvar count = 0;\n\t{element}\n}}\n");
+            let diagnostics = lint(&source);
+            let dynamic = diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.code == "tsrx-dynamic-tag-expression")
+                .collect::<Vec<_>>();
+            assert_eq!(
+                reported(&source, &dynamic),
+                [("tsrx-dynamic-tag-expression".to_string(), expression)],
+                "{source}"
+            );
+            assert!(
+                diagnostics.iter().any(|diagnostic| diagnostic.rule == "no-var"),
+                "{source}: {diagnostics:?}"
+            );
+        }
+    }
+}
