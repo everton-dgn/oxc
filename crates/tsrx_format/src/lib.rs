@@ -850,6 +850,61 @@ mod tests {
     }
 
     #[test]
+    fn jsx_text_comments_keep_their_own_lines_and_meaning() {
+        // `@tsrx/core` 0.5 reads a JavaScript comment in JSX text as a comment. Reflowed as TSX
+        // text, `a\n// note\nb` would print as `a // note b`, where the `//` is text and `b`
+        // follows it. A run of text holding a comment is written back as authored instead,
+        // re-indented, while the rest of the file still formats.
+        let source = concat!(
+            "export function App({ a, b }) @{\n",
+            "\t<div>\n",
+            "\t\ta\n",
+            "\t\t// note\n",
+            "\t\tb /* inline */ c\n",
+            "\t\t// <b>x</b>\n",
+            "\t\t/* {a} */\n",
+            "\t\t<i>y</i>\n",
+            "\t</div>\n",
+            "}\n",
+            "\n",
+            "export function Plain() {\n",
+            "\treturn <p>a /* x */ b<b /> // c\n",
+            "\t\td</p>;\n",
+            "}\n",
+        );
+        let first = format_text(Path::new("App.tsrx"), source).unwrap();
+        assert_eq!(
+            first.code,
+            concat!(
+                "export function App({ a, b }) @{\n",
+                "  <div>\n",
+                "    a\n",
+                "    // note\n",
+                "    b /* inline */ c\n",
+                "    // <b>x</b>\n",
+                "    /* {a} */\n",
+                "    <i>y</i>\n",
+                "  </div>;\n",
+                "}\n",
+                "\n",
+                "export function Plain() {\n",
+                "  return (\n",
+                "    <p>\n",
+                "      a /* x */ b\n",
+                "      <b />\n",
+                "      // c\n",
+                "      d\n",
+                "    </p>\n",
+                "  );\n",
+                "}\n",
+            )
+        );
+        let second = format_text(Path::new("App.tsrx"), &first.code).unwrap();
+        assert_eq!(second.code, first.code);
+        assert!(!second.changed);
+    }
+
+    #[test]
     fn sort_imports_orders_a_tsrx_import_chunk_and_converges() {
         let source = concat!(
             "import { z } from \"zebra\";\n",

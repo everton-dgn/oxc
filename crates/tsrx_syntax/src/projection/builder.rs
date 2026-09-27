@@ -72,6 +72,9 @@ struct Builder<'a> {
     record_segments: bool,
     type_semantic: bool,
     cursor: usize,
+    /// Next unwritten entry of `overlay.jsx_text_comments` (lint and type lanes) or
+    /// `overlay.jsx_text_comment_runs` (formatter lane).
+    text_comment: usize,
 }
 
 impl<'a> Builder<'a> {
@@ -107,11 +110,29 @@ impl<'a> Builder<'a> {
             record_segments,
             type_semantic,
             cursor: 0,
+            text_comment: 0,
+        }
+    }
+
+    /// The formatter lane records no segments; it holds each JSX text run that has a comment out
+    /// of Oxfmt whole. The lint and type lanes write each comment as a comment instead.
+    const fn holds_text_comment_runs(&self) -> bool {
+        !self.record_segments
+    }
+
+    fn text_comment_events(&self) -> &'a [ByteSpan] {
+        if self.holds_text_comment_runs() {
+            &self.overlay.jsx_text_comment_runs
+        } else {
+            &self.overlay.jsx_text_comments
         }
     }
 
     fn finish(mut self) -> Result<MappedProjection, ProjectionError> {
         self.copy_to(self.source.len())?;
+        if self.text_comment != self.text_comment_events().len() {
+            return Err(ProjectionError::StructuralMismatch);
+        }
         Ok(MappedProjection {
             projected: self.output,
             segments: self.segments,
@@ -141,11 +162,70 @@ impl<'a> Builder<'a> {
         self.copy_original_with_fixability(span, true)
     }
 
+    /// Copies an authored span. A JavaScript comment in JSX text inside it is not text to OXC:
+    /// the lint and type lanes write it inside braces, `{/* ... */}` or `{// ...` and a line
+    /// break, where OXC reads it as a comment, and the formatter lane replaces the whole text
+    /// run that holds it with a marker `lift_formatted` restores.
     fn copy_original_with_fixability(
         &mut self,
         span: ByteSpan,
         fixable: bool,
     ) -> Result<(), ProjectionError> {
+        let events = self.text_comment_events();
+        let mut start = span.start;
+        while let Some(event) = events.get(self.text_comment).copied() {
+            if event.start >= span.end {
+                break;
+            }
+            if event.start < start || event.end > span.end {
+                return Err(ProjectionError::StructuralMismatch);
+            }
+            self.copy_plain(ByteSpan::new(start, event.start), fixable)?;
+            if self.holds_text_comment_runs() {
+                self.text_comment_run_marker(event)?;
+            } else {
+                self.output.push('{');
+                self.copy_plain(event, fixable)?;
+                if self.source.as_bytes().get(event.start as usize + 1) == Some(&b'/') {
+                    self.output.push('\n');
+                }
+                self.output.push('}');
+            }
+            self.text_comment += 1;
+            start = event.end;
+        }
+        self.copy_plain(ByteSpan::new(start, span.end), fixable)
+    }
+
+    /// Writes the formatter marker for one JSX text run holding a comment. A run that spans lines
+    /// or holds a line comment gets a line-comment marker, which Oxfmt always prints on lines of
+    /// its own, so the restored run keeps its own lines. A one-line run of block comments and text
+    /// stays inline.
+    fn text_comment_run_marker(&mut self, run: ByteSpan) -> Result<(), ProjectionError> {
+        let ordinal = self.text_comment;
+        let content = self
+            .source
+            .get(run.start as usize..run.end as usize)
+            .ok_or(ProjectionError::SourceChanged { offset: run.start })?;
+        let comments = &self.overlay.jsx_text_comments;
+        let first = comments.partition_point(|comment| comment.start < run.start);
+        let own_lines = content.contains(['\n', '\r'])
+            || comments[first..].iter().take_while(|comment| comment.end <= run.end).any(
+                |comment| self.source.as_bytes().get(comment.start as usize + 1) == Some(&b'/'),
+            );
+        if own_lines {
+            write!(self.output, "{{// {}Y{ordinal}__\n}}", self.prefix)
+        } else {
+            write!(self.output, "{{/*{}Y{ordinal}__*/}}", self.prefix)
+        }
+        .expect("writing to a String cannot fail");
+        Ok(())
+    }
+
+    fn copy_plain(&mut self, span: ByteSpan, fixable: bool) -> Result<(), ProjectionError> {
+        if span.is_empty() {
+            return Ok(());
+        }
         let start = span.start as usize;
         let end = span.end as usize;
         let Some(value) = self.source.get(start..end) else {
@@ -812,6 +892,17 @@ pub(super) fn build_projection_with_purpose(
     purpose: ProjectionPurpose,
 ) -> Result<BuiltProjection, ProjectionError> {
     validate_overlay_source(source, overlay)?;
+    // A comment swallowed an element's closing tag. `@tsrx/core` rejects the source, and no
+    // tooling lane rewrites authored markup to close it.
+    if let Some(close) = overlay.implicit_closes.first() {
+        return Err(ProjectionError::UnclosedTag {
+            offset: close.offset,
+            name: source
+                .get(close.name.start as usize..close.name.end as usize)
+                .unwrap_or_default()
+                .to_owned(),
+        });
+    }
     let prefix = collision_free_prefix(source)?;
     let (wrapper_actions, wrappers) = build_wrapper_actions(overlay)?;
 

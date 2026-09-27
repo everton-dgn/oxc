@@ -117,6 +117,35 @@ Lowercase raw `<style>` elements are recognized with opaque payload spans. The
 CSS bytes are preserved exactly: carried through lint and format untouched,
 never CSS-formatted or CSS-validated.
 
+## Comments in JSX text
+
+As in `@tsrx/core` 0.5, anything that looks like a JavaScript comment in JSX
+text is a comment, not text. A `/* ... */` is a comment anywhere in the text.
+A `//` is a comment up to the end of its line when nothing but spaces and tabs
+come before it on that line, or since the tag, element, or `{...}` child just
+before it:
+
+```tsrx
+<div>
+  Visible text
+  // <Debug /> is commented out, and so is {value} here
+  /* a block comment can span lines and hold tags or braces */
+  more text a // after text on the same line, this is text
+</div>
+```
+
+The comment is read before tags and braces, so it can hold a whole element, a
+`{...}` child, a `}`, or a `<`. It is left out of the text around it, and it
+shows up with the other comments. `oxc-tsrx lint` reads it as a comment too, so
+a variable mentioned only inside one is still unused. `oxc-tsrx fmt` keeps each
+run of text that holds a comment as you wrote it, only re-indented, so a line
+comment never ends up joined to the text after it.
+
+To write the characters as text, escape one of them: `&#47;*` or `&#47;&#47;`.
+A comment that runs over its element's closing tag, such as `<p>// note</p>`,
+leaves the element open until the `}` that closes the template, which is
+reported as `Unclosed tag '<p>'` (code `tsrx-unclosed-tag`).
+
 ## Protected regions
 
 The scanner protects strings, comments, regex literals, template text and

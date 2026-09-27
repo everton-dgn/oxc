@@ -23,6 +23,7 @@ pub(crate) fn validate_projection(
         .map_err(|_| TsrxParseError::Unsupported("projection above 4 GiB"))?;
     let allowed_gaps = build_allowed_gaps(source, overlay, source_len)?;
     let mut gap_index = 0_usize;
+    let mut text_comment_index = 0_usize;
     let mut original_cursor = 0_u32;
     let mut projected_cursor = 0_u32;
     for segment in view.segments {
@@ -39,7 +40,6 @@ pub(crate) fn validate_projection(
             || segment.projected.end > projected_len
             || segment.original_start < original_cursor
             || original_end > source_len
-            || !segment.fixable
             || !consume_allowed_gap(
                 original_cursor,
                 segment.original_start,
@@ -51,16 +51,33 @@ pub(crate) fn validate_projection(
         }
         let projected = slice(view.source, segment.projected.start, segment.projected.end)?;
         let authored = slice(source, segment.original_start, original_end)?;
-        if projected != authored {
-            return Err(TsrxParseError::Unsupported(
-                "affine projection bytes differ from authored source",
-            ));
+        if segment.fixable {
+            if projected != authored {
+                return Err(TsrxParseError::Unsupported(
+                    "affine projection bytes differ from authored source",
+                ));
+            }
+        } else {
+            // The only non-fixable segment is a comment in JSX text, written as whitespace that
+            // keeps its line breaks.
+            let comment = overlay.jsx_text_comments.get(text_comment_index);
+            text_comment_index += 1;
+            if comment != Some(&ByteSpan::new(segment.original_start, original_end))
+                || !projected.bytes().zip(authored.bytes()).all(|(projected, authored)| {
+                    projected == if matches!(authored, b'\n' | b'\r') { authored } else { b' ' }
+                })
+            {
+                return Err(TsrxParseError::Unsupported(
+                    "projected JSX text comment differs from its authored comment",
+                ));
+            }
         }
         projected_cursor = segment.projected.end;
         original_cursor = original_end;
     }
     if !consume_allowed_gap(original_cursor, source_len, &allowed_gaps, &mut gap_index)
         || gap_index != allowed_gaps.len()
+        || text_comment_index != overlay.jsx_text_comments.len()
     {
         return Err(TsrxParseError::Unsupported(
             "projection omitted non-structural authored bytes",

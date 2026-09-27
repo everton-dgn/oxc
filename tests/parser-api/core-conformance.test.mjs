@@ -98,6 +98,121 @@ test("#110: a // line and a block comment in JSX text are left out of value and 
   }
 });
 
+const markup = (ast) => ({
+  texts: texts(ast),
+  elements: findAll(ast, (node) => node.type === "JSXElement").map(
+    (node) => node.openingElement.name.name,
+  ),
+  containers: findAll(ast, (node) => node.type === "JSXExpressionContainer").length,
+});
+
+test("#110: a comment in JSX text is read before tags and braces, so it can hold them", () => {
+  const cases = [
+    // A line comment comments out an element, and a block comment a braced child.
+    [
+      "export function App({ a }) @{\n\t<div>\n\t\t// <b>x</b>\n\t\t<i>y</i>\n\t</div>\n}",
+      { texts: [{ value: "y", raw: "y", start: 56, end: 57 }], elements: ["div", "i"], containers: 0 },
+    ],
+    [
+      "export function App({ a }) {\n\treturn <div>\n\t\t/* {a} */\n\t\t<i>y</i>\n\t</div>;\n}",
+      { texts: [{ value: "y", raw: "y", start: 60, end: 61 }], elements: ["div", "i"], containers: 0 },
+    ],
+    [
+      "export function App({ a }) @{\n\t<div>\n\t\t/*\n\t\t<b>x</b>\n\t\t*/\n\t\t<i>y</i>\n\t</div>\n}",
+      { texts: [{ value: "y", raw: "y", start: 63, end: 64 }], elements: ["div", "i"], containers: 0 },
+    ],
+    // The text around a comment stays one text, spanning the comment.
+    [
+      "export function App() @{\n\t<div>\n\t\tx\n\t\t// <b>q</b>\n\t</div>\n}",
+      {
+        texts: [{ value: "\n\t\tx\n\t\t\n\t", raw: "\n\t\tx\n\t\t\n\t", start: 31, end: 51 }],
+        elements: ["div"],
+        containers: 0,
+      },
+    ],
+    [
+      "export function App() {\n\treturn <div>a /* } */ b</div>;\n}",
+      { texts: [{ value: "a  b", raw: "a  b", start: 37, end: 48 }], elements: ["div"], containers: 0 },
+    ],
+    [
+      "export function App() @{\n\t<div>a /* < */ b</div>\n}",
+      { texts: [{ value: "a  b", raw: "a  b", start: 31, end: 42 }], elements: ["div"], containers: 0 },
+    ],
+    // A `//` after text on its line is text, even right before a tag.
+    [
+      "export function App() @{\n\t<div>see http://<b>x</b></div>\n}",
+      {
+        texts: [
+          { value: "see http://", raw: "see http://", start: 31, end: 42 },
+          { value: "x", raw: "x", start: 45, end: 46 },
+        ],
+        elements: ["div", "b"],
+        containers: 0,
+      },
+    ],
+  ];
+  for (const [source, expected] of cases) {
+    assert.deepEqual(markup(parseModule(source, "App.tsrx")), expected, source);
+  }
+});
+
+test("#110: a comment in JSX text is a comment to the parser, in source order", () => {
+  const comments = [];
+  parseModule("// top\nexport function App() @{\n\t<p>a /* x */ b\n\t\t// y\n\t</p>\n}", "App.tsrx", {
+    comments,
+  });
+  assert.deepEqual(
+    comments.map(({ type, value, start, end }) => [type, value, start, end]),
+    [
+      ["Line", " top", 0, 6],
+      ["Block", " x ", 38, 45],
+      ["Line", " y", 50, 54],
+    ],
+  );
+});
+
+test("#110: a comment that swallows a closing tag leaves the element unclosed, as core reports", () => {
+  const unclosed = (tag) => `Unclosed tag '<${tag}>'. Expected '</${tag}>' before end of template.`;
+  const strict = (source) => {
+    try {
+      parseModule(source, "App.tsrx");
+    } catch (error) {
+      return [error.message, error.pos, error.code ?? null, [error.loc.line, error.loc.column]];
+    }
+    return null;
+  };
+  const collected = (source) => {
+    const errors = [];
+    try {
+      parseModule(source, "App.tsrx", { collect: true, errors });
+    } catch (error) {
+      return ["throws", error.message, error.pos];
+    }
+    return errors.map((error) => [error.message, error.pos, error.code]);
+  };
+  // A line comment runs over the closing tag; the element ends at the `}` closing the template.
+  for (const [source, pos] of [
+    ["export function App() @{\n\t<p>// c</p>\n}", 38],
+    ["export function App() {\n\treturn <p>// c</p>;\n}", 45],
+  ]) {
+    assert.deepEqual(strict(source), [`${unclosed("p")} (3:0)`, pos, null, [3, 0]], source);
+    assert.deepEqual(collected(source), [[unclosed("p"), pos, "tsrx-unclosed-tag"]], source);
+  }
+  const nested = "export function App() @{\n\t<div><p>// c</p></div>\n}";
+  assert.deepEqual(collected(nested), [
+    [unclosed("p"), 49, "tsrx-unclosed-tag"],
+    [unclosed("div"), 49, "tsrx-unclosed-tag"],
+  ]);
+  // A block comment with no end runs to the end of the source.
+  for (const [source, pos] of [
+    ["export function App() @{\n\t<p>a /* open\n\t\tb</p>\n}", 48],
+    ["export function App() {\n\treturn <p>a /* open\n\t\tb</p>;\n}", 55],
+  ]) {
+    assert.deepEqual(strict(source), [`${unclosed("p")} (4:1)`, pos, null, [4, 1]], source);
+    assert.deepEqual(collected(source), ["throws", "'}' expected. (4:1)", pos], source);
+  }
+});
+
 test("#112: a non-breaking space next to a line break is text, not layout", () => {
   const cases = [
     [

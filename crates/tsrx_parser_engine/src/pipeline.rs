@@ -10,8 +10,8 @@ use oxc_adapter::{
     },
 };
 use tsrx_syntax::{
-    Overlay, OverlayView, PARSER_RECOVERY_DIAGNOSTIC, ProjectionView, project_for_parser,
-    recover_for_parser, scan_for_parser,
+    ImplicitClose, ImplicitCloser, Overlay, OverlayView, PARSER_RECOVERY_DIAGNOSTIC,
+    ProjectionView, project_for_parser, recover_for_parser, scan_for_parser,
 };
 use tsrx_tape_schema::{
     CommentTable, DiagnosticPhase, DiagnosticSeverity, DiagnosticTable, FlatTape, ModuleTable,
@@ -115,6 +115,33 @@ pub(super) fn push_multiple_output_diagnostics(
     Ok(())
 }
 
+/// Records `@tsrx/core`'s recoverable `Unclosed tag` diagnostic for each element a `}` closed
+/// before its closing tag, innermost first, at that `}`.
+fn push_unclosed_tag_diagnostics(
+    errors: &mut DiagnosticTable,
+    closes: &[ImplicitClose],
+    filename: &str,
+    source: &str,
+) -> Result<(), TsrxParseError> {
+    for close in closes {
+        let labels =
+            errors.append_labels([(TapeSpan::new(close.offset, close.offset + 1), None, true)])?;
+        errors.push_diagnostic(
+            DiagnosticPhase::Grammar,
+            DiagnosticSeverity::Error,
+            &close.message(source),
+            labels,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )?;
+    }
+    render_diagnostic_codeframes(filename, source, errors).map_err(TsrxParseError::from)
+}
+
 /// Records one recoverable diagnostic per dynamic tag whose expression isn't an allowed form, as
 /// `@tsrx/core` reports it: at the invalid part of the opening tag's expression, with its message.
 ///
@@ -181,6 +208,8 @@ fn parse_tsrx_utf8_source_once<W: Utf16WorkObserver>(
         && overlay_view.dynamic_tags.is_empty()
         && overlay_view.style_blocks.is_empty()
         && overlay_view.script_blocks.is_empty()
+        && overlay_view.jsx_text_comments.is_empty()
+        && overlay_view.implicit_closes.is_empty()
     {
         return parse_direct(
             source,
@@ -393,6 +422,7 @@ fn parse_projected<W: Utf16WorkObserver>(
         filename: options.filename,
         overlay: overlay_view,
         projection: projection_view,
+        implicit_closers: projected.implicit_closers(),
         prefix,
         tape,
         projected_module,
@@ -441,6 +471,7 @@ struct ProjectedCompletion<'source, 'filename, 'overlay, 'projection> {
     filename: &'filename str,
     overlay: OverlayView<'overlay>,
     projection: ProjectionView<'projection>,
+    implicit_closers: &'projection [ImplicitCloser],
     prefix: &'projection str,
     tape: FlatTape,
     projected_module: Option<ModuleTable>,
@@ -492,9 +523,21 @@ impl ProjectedCompletion<'_, '_, '_, '_> {
         finalize_reachable_spans(
             &mut self.tape,
             self.projection.segments,
+            self.implicit_closers,
             &authored_starts,
             &finalization_index,
         )?;
+        // A comment swallowed a closing tag, and the projection closed the element at the `}`
+        // that ends it. `@tsrx/core` reports each such element and keeps the tree.
+        if !self.overlay.implicit_closes.is_empty() {
+            self.recovered = true;
+            push_unclosed_tag_diagnostics(
+                &mut self.errors,
+                self.overlay.implicit_closes,
+                self.filename,
+                self.source,
+            )?;
+        }
         // A later output node is authored grammar the reconstruction recovered from, so the
         // result keeps its Program but is never reported as a complete parse.
         let multiple_outputs = collect_multiple_output_diagnostics(&self.tape)?;

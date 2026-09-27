@@ -58,6 +58,8 @@ function parserOptions(filename, eagerTsrx = false) {
 const DYNAMIC_TAG_REFERENCE_MESSAGE = "A dynamic tag expression must be an identifier, a member access such as `props.as` or `registry[name]`, or a string literal. Compute anything else before the element: `const Tag = c ? Child : Fallback;`, then `<{Tag} />`.";
 const DYNAMIC_TAG_EXPRESSION_CODE = "tsrx-dynamic-tag-expression";
 const DYNAMIC_TAG_NOT_EXPRESSION_MESSAGE = /^malformed TSRX at byte \d+: expected a valid dynamic JSX tag expression$/u;
+const UNCLOSED_TAG_MESSAGE = /^Unclosed tag '<[^'\r\n]*>'\. Expected '<\/[^'\r\n]*>' before end of template\.$/u;
+const UNCLOSED_TAG_CODE = "tsrx-unclosed-tag";
 const IDENTIFIER_START = /[$_\p{ID_Start}]/u;
 const IDENTIFIER_CONTINUE = /[$_\u200c\u200d\p{ID_Continue}]/u;
 const WHITESPACE = /\s/u;
@@ -189,8 +191,24 @@ function dynamicTagNotExpressionError(error, positionAt) {
 	raised.raisedAt = end;
 	return raised;
 }
+function isUnclosedTag(error) {
+	return typeof error?.message === "string" && UNCLOSED_TAG_MESSAGE.test(error.message);
+}
+function acornRaise(message, start, positionAt) {
+	const loc = positionAt(start);
+	const raised = /* @__PURE__ */ new SyntaxError(`${message} (${loc.line}:${loc.column})`);
+	raised.pos = start;
+	raised.loc = loc;
+	raised.raisedAt = start;
+	return raised;
+}
+function unclosedTagFailure(error, collecting, positionAt, source) {
+	if (collecting && typeof source === "string") return acornRaise("'}' expected.", source.length, positionAt);
+	return acornRaise(error.message, primarySpan(error).start ?? 0, positionAt);
+}
 function compatibleDiagnosticCode(error, message) {
 	if (typeof error?.code === "string") return error.code;
+	if (UNCLOSED_TAG_MESSAGE.test(message)) return UNCLOSED_TAG_CODE;
 	return message === DYNAMIC_TAG_REFERENCE_MESSAGE ? DYNAMIC_TAG_EXPRESSION_CODE : void 0;
 }
 function toCompileError(error, filename, positionAt, type, source) {
@@ -1694,6 +1712,7 @@ function scopeFatalError(error, filename, positionAt) {
 function strictError(errors, filename, positionAt, source) {
 	const error = errors.find((candidate) => candidate?.compatFatal !== null) ?? errors[0];
 	if (error?.compatFatal != null) return scopeFatalError(error, filename, positionAt);
+	if (isUnclosedTag(error)) return acornRaise(error.message, primarySpan(error).start ?? 0, positionAt);
 	return toCompileError(error, filename, positionAt, "fatal", source);
 }
 function mergeBySourceOrder(left, right) {
@@ -1831,6 +1850,7 @@ function createTsrxCoreCompat(parser) {
 				} else {
 					if (isOperationalError(error) || !isSyntaxErrorLike(error)) throw error;
 					if (isDynamicTagNotExpression(error)) throw dynamicTagNotExpressionError(error, positions());
+					if (isUnclosedTag(error)) throw unclosedTagFailure(error, collecting, positions(), source);
 					const translated = toCompileError(error, resolvedFilename, positions(), "fatal", source);
 					if (collecting && Array.isArray(options?.errors)) options.errors.push(toCompileError(error, resolvedFilename, positions(), "usage", source));
 					throw translated;
@@ -1846,6 +1866,8 @@ function createTsrxCoreCompat(parser) {
 			if (parserResultProgram(result) === null) {
 				const notExpression = parserResultErrors(result).find(isDynamicTagNotExpression);
 				if (notExpression !== void 0) throw dynamicTagNotExpressionError(notExpression, positions());
+				const unclosed = parserResultErrors(result)[0];
+				if (isUnclosedTag(unclosed)) throw unclosedTagFailure(unclosed, collecting, positions(), source);
 			}
 			let program;
 			let comments;

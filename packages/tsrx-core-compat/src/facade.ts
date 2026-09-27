@@ -108,6 +108,15 @@ const DYNAMIC_TAG_REFERENCE_MESSAGE =
 const DYNAMIC_TAG_EXPRESSION_CODE = "tsrx-dynamic-tag-expression";
 const DYNAMIC_TAG_NOT_EXPRESSION_MESSAGE =
   /^malformed TSRX at byte \d+: expected a valid dynamic JSX tag expression$/u;
+// `@tsrx/core` 0.5 reads a JavaScript comment in JSX text as a comment, so one can swallow an
+// element's closing tag (`<p>// c</p>`). Core then ends the element at the `}` that closes the
+// template and reports it as unclosed: a strict parse raises it through acorn, with the position
+// appended to the message and no code, and `collect`/`loose` record it with a code and keep the
+// tree. When a block comment runs to the end of the source instead, a strict parse raises the
+// same message there, and a collecting parse goes on to fail on the missing `}`.
+const UNCLOSED_TAG_MESSAGE =
+  /^Unclosed tag '<[^'\r\n]*>'\. Expected '<\/[^'\r\n]*>' before end of template\.$/u;
+const UNCLOSED_TAG_CODE = "tsrx-unclosed-tag";
 const IDENTIFIER_START = /[$_\p{ID_Start}]/u;
 const IDENTIFIER_CONTINUE = /[$_\u200c\u200d\p{ID_Continue}]/u;
 const WHITESPACE = /\s/u;
@@ -297,8 +306,37 @@ function dynamicTagNotExpressionError(error, positionAt) {
   return raised;
 }
 
+function isUnclosedTag(error) {
+  return typeof error?.message === "string" && UNCLOSED_TAG_MESSAGE.test(error.message);
+}
+
+// An error raised as acorn raises it: `pos`, a `{ line, column }` `loc`, and `raisedAt`, with the
+// position appended to the message and no `end`, `code`, or `type`.
+function acornRaise(message, start, positionAt) {
+  const loc = positionAt(start);
+  const raised = new SyntaxError(`${message} (${loc.line}:${loc.column})`) as SyntaxError & {
+    pos?: number;
+    loc?: unknown;
+    raisedAt?: number;
+  };
+  raised.pos = start;
+  raised.loc = loc;
+  raised.raisedAt = start;
+  return raised;
+}
+
+// The error core raises for an unclosed tag the native parser could not close: in a strict parse
+// the unclosed tag, and in a collecting one the end of the source where `}` was expected.
+function unclosedTagFailure(error, collecting, positionAt, source) {
+  if (collecting && typeof source === "string") {
+    return acornRaise("'}' expected.", source.length, positionAt);
+  }
+  return acornRaise(error.message, primarySpan(error).start ?? 0, positionAt);
+}
+
 function compatibleDiagnosticCode(error, message) {
   if (typeof error?.code === "string") return error.code;
+  if (UNCLOSED_TAG_MESSAGE.test(message)) return UNCLOSED_TAG_CODE;
   return message === DYNAMIC_TAG_REFERENCE_MESSAGE ? DYNAMIC_TAG_EXPRESSION_CODE : undefined;
 }
 
@@ -1065,8 +1103,9 @@ function stripTextComments(text) {
   return changed ? output + text.slice(segmentStart) : null;
 }
 
-// The native parser leaves template text comments out already, so this reads only text that is
-// still exactly as written: plain-function JSX, and elements nested in expression containers.
+// The native TSRX parser reads comments in JSX text before tags and braces and leaves them out
+// already, so this reads only text that is still exactly as written: the ordinary `.tsx`/`.jsx`
+// lane, which OXC parses as TSX, where a comment can't hold a tag or a brace.
 function stripAuthoredTextComments(child, source) {
   if (
     typeof source !== "string" ||
@@ -2138,6 +2177,7 @@ function scopeFatalError(error, filename, positionAt) {
 function strictError(errors, filename, positionAt, source) {
   const error = errors.find((candidate) => candidate?.compatFatal !== null) ?? errors[0];
   if (error?.compatFatal != null) return scopeFatalError(error, filename, positionAt);
+  if (isUnclosedTag(error)) return acornRaise(error.message, primarySpan(error).start ?? 0, positionAt);
   return toCompileError(error, filename, positionAt, "fatal", source);
 }
 
@@ -2323,6 +2363,7 @@ export function createTsrxCoreCompat(parser) {
           if (isDynamicTagNotExpression(error)) {
             throw dynamicTagNotExpressionError(error, positions());
           }
+          if (isUnclosedTag(error)) throw unclosedTagFailure(error, collecting, positions(), source);
           const translated = toCompileError(error, resolvedFilename, positions(), "fatal", source);
           if (collecting && Array.isArray(options?.errors)) {
             options.errors.push(
@@ -2353,6 +2394,10 @@ export function createTsrxCoreCompat(parser) {
       if (parserResultProgram(result) === null) {
         const notExpression = parserResultErrors(result).find(isDynamicTagNotExpression);
         if (notExpression !== undefined) throw dynamicTagNotExpressionError(notExpression, positions());
+        const unclosed = parserResultErrors(result)[0];
+        if (isUnclosedTag(unclosed)) {
+          throw unclosedTagFailure(unclosed, collecting, positions(), source);
+        }
       }
 
       let program;

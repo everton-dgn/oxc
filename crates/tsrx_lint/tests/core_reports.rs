@@ -110,3 +110,37 @@ fn a_clean_file_reports_neither() {
                   }\n";
     assert!(lint(source).is_empty());
 }
+
+#[test]
+fn a_comment_in_jsx_text_is_a_comment_to_the_lint_rules() {
+    // `@tsrx/core` 0.5 reads JavaScript comments in JSX text as comments, so what a comment holds
+    // is not code: `a` and `b` below are unused, and `c` after the comment is used.
+    let source = "export function View() @{\n\
+                  \tconst a = 1;\n\
+                  \tconst b = 2;\n\
+                  \tconst c = 3;\n\
+                  \t<div>\n\
+                  \t\t/* {a} */\n\
+                  \t\t// {b}\n\
+                  \t\t{c}\n\
+                  \t</div>\n\
+                  }\n";
+    let diagnostics = LintSession::new_with_config_source(
+        Path::new("/demo"),
+        Some(r#"{ "rules": { "no-unused-vars": "error" } }"#),
+        &[],
+        false,
+    )
+    .expect("an in-memory config compiles without reading the filesystem")
+    .lint_text(Path::new("/demo/View.tsrx"), source)
+    .expect("the file lints")
+    .diagnostics;
+    let unused = diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code == "eslint(no-unused-vars)")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        reported(source, &unused),
+        [("eslint(no-unused-vars)".to_owned(), "a"), ("eslint(no-unused-vars)".to_owned(), "b")]
+    );
+}

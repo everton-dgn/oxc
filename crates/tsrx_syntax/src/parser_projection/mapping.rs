@@ -18,6 +18,15 @@ pub struct MappedProjection {
     pub(super) dynamic_offsets: Vec<u32>,
     pub(super) synthetic_generator_spans: Vec<ByteSpan>,
     pub(super) synthetic_callee_spans: Vec<(u32, u32)>,
+    pub(super) implicit_closers: Vec<ImplicitCloser>,
+}
+
+/// A closing tag the parser projection wrote for an element a `}` ended early: its projected
+/// bytes, and the authored `}` every offset inside them stands for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImplicitCloser {
+    pub projected: ByteSpan,
+    pub original: u32,
 }
 
 impl MappedProjection {
@@ -83,6 +92,13 @@ impl MappedProjection {
     #[must_use]
     pub fn synthetic_callee_spans(&self) -> &[(u32, u32)] {
         &self.synthetic_callee_spans
+    }
+
+    /// Closing tags written for elements a `}` ended before their own closing tag, in
+    /// projected order.
+    #[must_use]
+    pub fn implicit_closers(&self) -> &[ImplicitCloser] {
+        &self.implicit_closers
     }
 }
 

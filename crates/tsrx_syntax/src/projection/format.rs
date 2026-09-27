@@ -88,6 +88,8 @@ pub struct FormatProjection {
     pub(super) dynamic_comments: Vec<ByteSpan>,
     pub(super) styles: Vec<StyleManifest>,
     pub(super) scripts: Vec<ScriptManifest>,
+    /// Authored JSX text runs that hold a comment, restored verbatim by the lift.
+    pub(super) text_comment_runs: Vec<ByteSpan>,
     pub(super) parser_code_blocks: Vec<ParserCodeBlock>,
     pub(super) parser_shorthand_attributes: Vec<ParserShorthandAttribute>,
     pub(super) shape_fingerprint: u128,
@@ -106,6 +108,7 @@ impl FormatProjection {
             + self.dynamic_comments.len()
             + self.styles.len()
             + self.scripts.len()
+            + self.text_comment_runs.len()
             + self.parser_code_blocks.len()
             + self.parser_shorthand_attributes.len()
     }
@@ -176,6 +179,7 @@ pub fn project_for_format(
         dynamic_comments: overlay.dynamic_comments.clone(),
         styles,
         scripts,
+        text_comment_runs: overlay.jsx_text_comment_runs.clone(),
         parser_code_blocks: overlay.parser_code_blocks.clone(),
         parser_shorthand_attributes: overlay.parser_shorthand_attributes.clone(),
         shape_fingerprint: structural_fingerprint(overlay),

@@ -1498,3 +1498,149 @@ fn nested_markup_lines_record_their_boundaries_in_source_order() {
     require_type(tape, rendered(tape, child), "JSXElement");
     assert_no_scaffold(tape);
 }
+
+fn visit_texts(tape: &FlatTape, value: ValueRef, found: &mut Vec<(String, String, (u32, u32))>) {
+    if let Some(object) = value.as_object() {
+        if scalar_field_opt(tape, object, "type") == Some(r#""JSXText""#) {
+            found.push((
+                scalar_field(tape, object, "value").to_owned(),
+                scalar_field(tape, object, "raw").to_owned(),
+                span(tape, object),
+            ));
+        }
+        for record in tape.fields(object) {
+            visit_texts(tape, record.value, found);
+        }
+    } else if let Some(list) = value.as_list() {
+        for item in tape.values(list) {
+            visit_texts(tape, item, found);
+        }
+    }
+}
+
+fn jsx_texts(tape: &FlatTape) -> Vec<(String, String, (u32, u32))> {
+    let mut found = Vec::new();
+    visit_texts(tape, tape.root(), &mut found);
+    found
+}
+
+#[test]
+fn jsx_text_comments_are_read_before_tags_and_braces() {
+    // tsrx-org/oxc#110: `@tsrx/core` 0.5 reads a JavaScript comment in JSX text as a comment
+    // before it looks for tags or braces, in templates and in plain-function JSX alike. The text
+    // around a comment stays one text without it, and the comment joins the comment table.
+    for (source, expected, comment) in [
+        (
+            "export function App({ a }) @{\n\t<div>\n\t\t// <b>x</b>\n\t\t<i>y</i>\n\t</div>\n}",
+            vec![(r#""y""#, 56, 57)],
+            "// <b>x</b>",
+        ),
+        (
+            "export function App({ a }) {\n\treturn <div>\n\t\t/* {a} */\n\t\t<i>y</i>\n\t</div>;\n}",
+            vec![(r#""y""#, 60, 61)],
+            "/* {a} */",
+        ),
+        (
+            "export function App() {\n\treturn <div>a /* } */ b</div>;\n}",
+            vec![(r#""a  b""#, 37, 48)],
+            "/* } */",
+        ),
+        (
+            "export function App() @{\n\t<div>a /* < */ b</div>\n}",
+            vec![(r#""a  b""#, 31, 42)],
+            "/* < */",
+        ),
+        (
+            "export function App() @{\n\t<div>\n\t\tx\n\t\t// <b>q</b>\n\t</div>\n}",
+            vec![(r#""\n\t\tx\n\t\t\n\t""#, 31, 51)],
+            "// <b>q</b>",
+        ),
+        (
+            "export function App({ c }) @{\n\t<main>{c && <b>\n\t\t// n\n\t\tx /* y */ z\n\t</b>}</main>\n}",
+            vec![(r#""\n\t\t\n\t\tx  z\n\t""#, 46, 69)],
+            "// n",
+        ),
+    ] {
+        let result = parse_tsrx(&TsrxParseRequest { source })
+            .unwrap_or_else(|error| panic!("{source:?}: {error:?}"));
+        assert!(result.errors.is_empty(), "{source:?}: {:?}", result.errors);
+        let texts = jsx_texts(result.program());
+        let actual = texts
+            .iter()
+            .map(|(value, raw, span)| {
+                assert_eq!(value, raw, "{source:?}");
+                (value.as_str(), span.0, span.1)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected, "{source:?}");
+        let comment_start = offset(source.find(comment).expect("comment"));
+        assert!(
+            result.comments.records().iter().any(|record| record.span.start == comment_start
+                && record.span.end == comment_start + offset(comment.len())),
+            "{source:?}: {comment:?} is in the comment table"
+        );
+        assert_no_scaffold(result.program());
+    }
+}
+
+#[test]
+fn a_line_comment_after_text_on_its_line_stays_text() {
+    for source in [
+        "export function App() @{\n\t<p>see http://<b>x</b></p>\n}",
+        "export function App() {\n\treturn <p>a // b</p>;\n}",
+    ] {
+        let result = parse_tsrx(&TsrxParseRequest { source })
+            .unwrap_or_else(|error| panic!("{source:?}: {error:?}"));
+        assert!(result.errors.is_empty(), "{source:?}");
+        assert!(result.comments.records().is_empty(), "{source:?}");
+        assert!(
+            jsx_texts(result.program()).iter().any(|(value, _, _)| value.contains("//")),
+            "{source:?}"
+        );
+    }
+}
+
+#[test]
+fn a_comment_that_swallows_a_closing_tag_leaves_its_element_unclosed() {
+    // `<p>// c</p>`: the comment runs over `</p>`, and the element ends at the `}` closing the
+    // template or function, where `@tsrx/core` reports it. The tree survives with the error.
+    for source in [
+        "export function App() @{\n\t<div><p>// c</p></div>\n}",
+        "export function App() {\n\treturn <div><p>// c</p></div>;\n}",
+    ] {
+        let result = parse_tsrx(&TsrxParseRequest { source })
+            .unwrap_or_else(|error| panic!("{source:?}: {error:?}"));
+        let brace = offset(source.rfind('}').expect("closing brace"));
+        let messages = result
+            .errors
+            .records()
+            .iter()
+            .map(|error| {
+                let labels = result.errors.labels(error.labels).expect("labels");
+                (result.errors.string(error.message).expect("message"), labels[0].span.start)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            messages,
+            [
+                ("Unclosed tag '<p>'. Expected '</p>' before end of template.", brace),
+                ("Unclosed tag '<div>'. Expected '</div>' before end of template.", brace),
+            ],
+            "{source:?}"
+        );
+        assert!(result.program.is_some(), "{source:?}");
+        assert!(jsx_texts(result.program()).is_empty(), "{source:?}");
+        assert_no_scaffold(result.program());
+    }
+    // A block comment with no end runs to the end of the source, which no parse recovers from.
+    let source = "export function App() @{\n\t<p>a /* open\n\t\tb</p>\n}";
+    let result = parse_tsrx(&TsrxParseRequest { source }).expect("grammar result");
+    assert!(result.program.is_none());
+    let error = &result.errors.records()[0];
+    assert_eq!(
+        result.errors.string(error.message),
+        Some("Unclosed tag '<p>'. Expected '</p>' before end of template.")
+    );
+    let label = result.errors.labels(error.labels).expect("labels")[0];
+    assert_eq!(label.span.start, offset(source.len()));
+}

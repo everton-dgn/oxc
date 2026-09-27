@@ -23,7 +23,8 @@ pub(super) fn projection_grammar_result(
     let offset = match error {
         ProjectionError::UnsupportedSyntax { offset, .. }
         | ProjectionError::UnterminatedSyntax { offset, .. }
-        | ProjectionError::MalformedSyntax { offset, .. } => *offset,
+        | ProjectionError::MalformedSyntax { offset, .. }
+        | ProjectionError::UnclosedTag { offset, .. } => *offset,
         other => return Err(TsrxParseError::from(other.clone())),
     };
     let message = error.to_string();
