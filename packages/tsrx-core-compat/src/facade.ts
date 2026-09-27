@@ -41,7 +41,34 @@ function tsrxRetry(parser, filename, source, eagerTsrx) {
   if (parserResultProgram(result) === null || parserResultErrors(result).length > 0) {
     return null;
   }
+  if (!source.includes("@{") && !acceptsWithoutTextComments(parser, filename, source, result)) {
+    return null;
+  }
   return { result, options };
+}
+
+// The TSRX lane runs none of OXC's semantic checks, so a retry made for text comments wins only
+// where the TSX lane accepts the same source with each of those comments blanked out.
+function acceptsWithoutTextComments(parser, filename, source, result) {
+  const masked = source.split("");
+  const stack = [parserResultProgram(result)];
+  while (stack.length > 0) {
+    const node = stack.pop();
+    if (node?.type === "JSXEmptyExpression" && /^\/[/*]/u.test(source.slice(node.start, node.end))) {
+      for (let index = node.start; index < node.end; index += 1) {
+        if (masked[index] !== "\n" && masked[index] !== "\r") masked[index] = " ";
+      }
+    }
+    for (const key in node) {
+      if (key !== "parent" && node[key] !== null && typeof node[key] === "object") stack.push(node[key]);
+    }
+  }
+  try {
+    const check = parser.parseSync(filename, masked.join(""), TYPESCRIPT_REACT_PARSER_OPTIONS);
+    return parserResultProgram(check) !== null && parserResultErrors(check).length === 0;
+  } catch {
+    return false;
+  }
 }
 
 function ordinaryParserOptions(lang) {

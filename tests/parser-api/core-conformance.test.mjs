@@ -142,6 +142,28 @@ test("#118: collect mode records an unclosed element whose text holds a comment"
   }
 });
 
+test("#118: a .tsx or .jsx comment outside JSX text never hides an error core reports", () => {
+  // The TSRX lane that reads text comments runs none of OXC's semantic checks, so a comment
+  // anywhere else must not let it take over from the TSX lane's error.
+  for (const source of [
+    "// helper\nexport function f() { return 1; }\nbreak;\n",
+    "const n = 010; // legacy\n",
+    "with (o) {} /* c */\n",
+  ]) {
+    for (const filename of ["App.tsx", "App.jsx"]) {
+      assert.throws(() => parseModule(source, filename), undefined, `${filename} ${source}`);
+      const errors = [];
+      let threw = false;
+      try {
+        parseModule(source, filename, { collect: true, errors });
+      } catch {
+        threw = true;
+      }
+      assert.ok(threw || errors.length > 0, `collect ${filename} ${source}`);
+    }
+  }
+});
+
 test("#110: a comment in JSX text is a comment to the parser, in source order", () => {
   const comments = [];
   parseModule("// top\nexport function App() @{\n\t<p>a /* x */ b\n\t\t// y\n\t</p>\n}", "App.tsrx", {
