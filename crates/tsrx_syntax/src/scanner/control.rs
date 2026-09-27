@@ -64,7 +64,13 @@ impl Scanner<'_> {
                 )?;
                 return Ok(body.end as usize);
             }
-            if self.bare_keyword_at(clause_start, b"else") {
+            // In JSX children, a bare `else` not followed by a block or `if` is text (`@tsrx/core`).
+            if self.bare_keyword_at(clause_start, b"else")
+                && (self.nodes[node as usize].context != ControlContext::JsxChild || {
+                    let next = self.skip_trivia(Self::after_bare_keyword(clause_start, b"else"))?;
+                    self.bytes.get(next) == Some(&b'{') || self.bare_keyword_at(next, b"if")
+                })
+            {
                 return Err(ProjectionError::MalformedSyntax {
                     offset: to_u32(clause_start)?,
                     expected: "`@else`",

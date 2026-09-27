@@ -14,7 +14,7 @@ use embedded::lift_embedded;
 use guards::lift_markup_guards;
 use parser::lift_parser_scaffolds;
 use scaffold::lift_scaffolds;
-use text_comments::lift_text_comment_runs;
+use text_comments::lift_text_comments;
 use tokens::lift_tokens;
 
 const MISSING_POSITION: usize = usize::MAX;
@@ -56,10 +56,10 @@ pub fn lift_formatted(
         lift_embedded(&lifted, original_source, projection)?
     };
     // Before the token lift, which reads every `/*` marker in the namespace as a token marker.
-    let lifted = if projection.text_comment_runs.is_empty() {
+    let lifted = if projection.text_comments.is_empty() {
         lifted
     } else {
-        lift_text_comment_runs(&lifted, projection)?
+        lift_text_comments(&lifted, projection)?
     };
     let lifted = lift_tokens(&lifted, projection)?;
     if lifted.contains(&projection.prefix) {

@@ -11,7 +11,9 @@ use support::{
     assert_failed, assert_no_scaffold, field, list_field, object_field, program_body, require_type,
     scalar_field, span,
 };
-use tsrx_parser_engine::{TsrxParseOptions, TsrxParseRequest, parse_tsrx, parse_tsrx_with_options};
+use tsrx_parser_engine::{
+    TsrxParseOptions, TsrxParseRequest, TsrxParseResult, parse_tsrx, parse_tsrx_with_options,
+};
 use tsrx_syntax::{project_for_parser, scan_for_parser};
 use tsrx_tape_schema::{FlatTape, RecordIndex, ValueKind, ValueRef};
 
@@ -1499,105 +1501,113 @@ fn nested_markup_lines_record_their_boundaries_in_source_order() {
     assert_no_scaffold(tape);
 }
 
-fn visit_texts(tape: &FlatTape, value: ValueRef, found: &mut Vec<(String, String, (u32, u32))>) {
+/// Each JSX text as `(value, start, end)`, and each empty `{}` as `("{}", start, end)` once its
+/// container is checked to span exactly the same bytes, in source order.
+fn visit_children(tape: &FlatTape, value: ValueRef, found: &mut Vec<(String, u32, u32)>) {
     if let Some(object) = value.as_object() {
-        if scalar_field_opt(tape, object, "type") == Some(r#""JSXText""#) {
-            found.push((
-                scalar_field(tape, object, "value").to_owned(),
-                scalar_field(tape, object, "raw").to_owned(),
-                span(tape, object),
-            ));
+        match scalar_field_opt(tape, object, "type") {
+            Some(r#""JSXText""#) => {
+                let (start, end) = span(tape, object);
+                let text = scalar_field(tape, object, "value");
+                assert_eq!(text, scalar_field(tape, object, "raw"));
+                found.push((text.to_owned(), start, end));
+            }
+            Some(r#""JSXExpressionContainer""#) => {
+                let expression = object_field(tape, object, "expression");
+                if scalar_field(tape, expression, "type") == r#""JSXEmptyExpression""# {
+                    let (start, end) = span(tape, object);
+                    assert_eq!(span(tape, expression), (start, end));
+                    found.push(("{}".to_owned(), start, end));
+                }
+            }
+            _ => {}
         }
         for record in tape.fields(object) {
-            visit_texts(tape, record.value, found);
+            visit_children(tape, record.value, found);
         }
     } else if let Some(list) = value.as_list() {
         for item in tape.values(list) {
-            visit_texts(tape, item, found);
+            visit_children(tape, item, found);
         }
     }
 }
 
-fn jsx_texts(tape: &FlatTape) -> Vec<(String, String, (u32, u32))> {
+fn jsx_children(tape: &FlatTape) -> Vec<(String, u32, u32)> {
     let mut found = Vec::new();
-    visit_texts(tape, tape.root(), &mut found);
+    visit_children(tape, tape.root(), &mut found);
     found
 }
 
 #[test]
-fn jsx_text_comments_are_read_before_tags_and_braces() {
-    // tsrx-org/oxc#110: `@tsrx/core` 0.5 reads a JavaScript comment in JSX text as a comment
-    // before it looks for tags or braces, in templates and in plain-function JSX alike. The text
-    // around a comment stays one text without it, and the comment joins the comment table.
-    for (source, expected, comment) in [
+fn jsx_text_comments_are_empty_children_read_before_tags_and_braces() {
+    // tsrx-org/oxc#118: `@tsrx/core` 0.5 reads a JavaScript comment in JSX text as a comment
+    // before it looks for tags or braces, in templates and in plain-function JSX alike. Each one
+    // is an empty `{}` child spanning exactly the comment, and joins the comment table.
+    let text = |value: &str, start, end| (format!("{value:?}"), start, end);
+    let empty = |start, end| ("{}".to_owned(), start, end);
+    for (source, expected) in [
         (
             "export function App({ a }) @{\n\t<div>\n\t\t// <b>x</b>\n\t\t<i>y</i>\n\t</div>\n}",
-            vec![(r#""y""#, 56, 57)],
-            "// <b>x</b>",
-        ),
-        (
-            "export function App({ a }) {\n\treturn <div>\n\t\t/* {a} */\n\t\t<i>y</i>\n\t</div>;\n}",
-            vec![(r#""y""#, 60, 61)],
-            "/* {a} */",
+            vec![
+                text("\n\t\t", 36, 39),
+                empty(39, 50),
+                text("\n\t\t", 50, 53),
+                text("y", 56, 57),
+                text("\n\t", 61, 63),
+            ],
         ),
         (
             "export function App() {\n\treturn <div>a /* } */ b</div>;\n}",
-            vec![(r#""a  b""#, 37, 48)],
-            "/* } */",
-        ),
-        (
-            "export function App() @{\n\t<div>a /* < */ b</div>\n}",
-            vec![(r#""a  b""#, 31, 42)],
-            "/* < */",
-        ),
-        (
-            "export function App() @{\n\t<div>\n\t\tx\n\t\t// <b>q</b>\n\t</div>\n}",
-            vec![(r#""\n\t\tx\n\t\t\n\t""#, 31, 51)],
-            "// <b>q</b>",
+            vec![text("a ", 37, 39), empty(39, 46), text(" b", 46, 48)],
         ),
         (
             "export function App({ c }) @{\n\t<main>{c && <b>\n\t\t// n\n\t\tx /* y */ z\n\t</b>}</main>\n}",
-            vec![(r#""\n\t\t\n\t\tx  z\n\t""#, 46, 69)],
-            "// n",
+            vec![
+                text("\n\t\t", 46, 49),
+                empty(49, 53),
+                text("\n\t\tx ", 53, 58),
+                empty(58, 65),
+                text(" z\n\t", 65, 69),
+            ],
+        ),
+        // A `//` touching other text is text, even right before a tag.
+        (
+            "export function App() @{\n\t<p>see http://<b>x</b> a//b /* a */// b</p>\n}",
+            vec![
+                text("see http://", 29, 40),
+                text("x", 43, 44),
+                text(" a//b ", 48, 54),
+                empty(54, 61),
+                text("// b", 61, 65),
+            ],
         ),
     ] {
         let result = parse_tsrx(&TsrxParseRequest { source })
             .unwrap_or_else(|error| panic!("{source:?}: {error:?}"));
         assert!(result.errors.is_empty(), "{source:?}: {:?}", result.errors);
-        let texts = jsx_texts(result.program());
-        let actual = texts
+        let children = jsx_children(result.program());
+        assert_eq!(children, expected, "{source:?}");
+        let comments =
+            result.comments.records().iter().map(|record| (record.span.start, record.span.end));
+        let empties = children
             .iter()
-            .map(|(value, raw, span)| {
-                assert_eq!(value, raw, "{source:?}");
-                (value.as_str(), span.0, span.1)
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(actual, expected, "{source:?}");
-        let comment_start = offset(source.find(comment).expect("comment"));
-        assert!(
-            result.comments.records().iter().any(|record| record.span.start == comment_start
-                && record.span.end == comment_start + offset(comment.len())),
-            "{source:?}: {comment:?} is in the comment table"
-        );
+            .filter(|(value, _, _)| value == "{}")
+            .map(|(_, start, end)| (*start, *end));
+        assert_eq!(comments.collect::<Vec<_>>(), empties.collect::<Vec<_>>(), "{source:?}");
         assert_no_scaffold(result.program());
     }
 }
 
-#[test]
-fn a_line_comment_after_text_on_its_line_stays_text() {
-    for source in [
-        "export function App() @{\n\t<p>see http://<b>x</b></p>\n}",
-        "export function App() {\n\treturn <p>a // b</p>;\n}",
-    ] {
-        let result = parse_tsrx(&TsrxParseRequest { source })
-            .unwrap_or_else(|error| panic!("{source:?}: {error:?}"));
-        assert!(result.errors.is_empty(), "{source:?}");
-        assert!(result.comments.records().is_empty(), "{source:?}");
-        assert!(
-            jsx_texts(result.program()).iter().any(|(value, _, _)| value.contains("//")),
-            "{source:?}"
-        );
-    }
+fn error_messages(result: &TsrxParseResult) -> Vec<(&str, u32)> {
+    result
+        .errors
+        .records()
+        .iter()
+        .map(|error| {
+            let labels = result.errors.labels(error.labels).expect("labels");
+            (result.errors.string(error.message).expect("message"), labels[0].span.start)
+        })
+        .collect()
 }
 
 #[test]
@@ -1611,36 +1621,50 @@ fn a_comment_that_swallows_a_closing_tag_leaves_its_element_unclosed() {
         let result = parse_tsrx(&TsrxParseRequest { source })
             .unwrap_or_else(|error| panic!("{source:?}: {error:?}"));
         let brace = offset(source.rfind('}').expect("closing brace"));
-        let messages = result
-            .errors
-            .records()
-            .iter()
-            .map(|error| {
-                let labels = result.errors.labels(error.labels).expect("labels");
-                (result.errors.string(error.message).expect("message"), labels[0].span.start)
-            })
-            .collect::<Vec<_>>();
         assert_eq!(
-            messages,
+            error_messages(&result),
             [
                 ("Unclosed tag '<p>'. Expected '</p>' before end of template.", brace),
                 ("Unclosed tag '<div>'. Expected '</div>' before end of template.", brace),
             ],
             "{source:?}"
         );
-        assert!(result.program.is_some(), "{source:?}");
-        assert!(jsx_texts(result.program()).is_empty(), "{source:?}");
+        let comment = source.find("// c").expect("comment");
+        let line_end = offset(comment + source[comment..].find('\n').expect("line break"));
+        let comment = offset(comment);
+        assert_eq!(
+            jsx_children(result.program()),
+            [("{}".to_owned(), comment, line_end), (format!("{:?}", "\n"), line_end, line_end + 1)],
+            "{source:?}"
+        );
         assert_no_scaffold(result.program());
     }
     // A block comment with no end runs to the end of the source, which no parse recovers from.
     let source = "export function App() @{\n\t<p>a /* open\n\t\tb</p>\n}";
     let result = parse_tsrx(&TsrxParseRequest { source }).expect("grammar result");
     assert!(result.program.is_none());
-    let error = &result.errors.records()[0];
     assert_eq!(
-        result.errors.string(error.message),
-        Some("Unclosed tag '<p>'. Expected '</p>' before end of template.")
+        error_messages(&result),
+        [("Unclosed tag '<p>'. Expected '</p>' before end of template.", offset(source.len()))]
     );
-    let label = result.errors.labels(error.labels).expect("labels")[0];
-    assert_eq!(label.span.start, offset(source.len()));
+}
+
+#[test]
+fn an_unclosed_element_whose_text_holds_a_comment_ends_at_the_brace() {
+    // tsrx-org/oxc#126 review: `@tsrx/core` ends an element at a `}` in its text and reports it
+    // unclosed, and collect mode keeps the tree. A comment may have swallowed the closing tag.
+    for source in [
+        "export function App() @{\n\t<p>// c\n}\n",
+        "export function App() @{\n\t<p>/* c */\n}\n",
+        "export function App() @{\n\t<p>a\n\t\t// c\n}\n",
+        "export function App() @{\n\t<p>\n\t\t<b />\n\t\t// c\n}\n",
+    ] {
+        let result = parse_tsrx(&TsrxParseRequest { source }).expect("grammar result");
+        let brace = offset(source.find('}').expect("brace"));
+        assert_eq!(
+            error_messages(&result),
+            [("Unclosed tag '<p>'. Expected '</p>' before end of template.", brace)],
+            "{source:?}"
+        );
+    }
 }

@@ -598,7 +598,15 @@ fn format_text_with_options(
     source: &str,
     options: Option<&FileFormatOptions>,
 ) -> Result<FormatOutput, FormatError> {
-    settle_format(source, |input| format_once(path, input, options))
+    // Oxfmt reads a lone CR in JSX text as a space, not a line break, which changes the text. A
+    // CR is a line break wherever it can stand outside a literal, so it is formatted as a LF.
+    if !contains_bare_carriage_return(source) {
+        return settle_format(source, |input| format_once(path, input, options));
+    }
+    let normalized = source.replace("\r\n", "\n").replace('\r', "\n");
+    let mut output = settle_format(&normalized, |input| format_once(path, input, options))?;
+    output.changed = output.code != source;
+    Ok(output)
 }
 
 /// Formats again when the first pass could have changed what the next one reads, so one
@@ -851,10 +859,9 @@ mod tests {
 
     #[test]
     fn jsx_text_comments_keep_their_own_lines_and_meaning() {
-        // `@tsrx/core` 0.5 reads a JavaScript comment in JSX text as a comment. Reflowed as TSX
-        // text, `a\n// note\nb` would print as `a // note b`, where the `//` is text and `b`
-        // follows it. A run of text holding a comment is written back as authored instead,
-        // re-indented, while the rest of the file still formats.
+        // `@tsrx/core` 0.5 reads a JavaScript comment in JSX text as a comment, the `{}` child
+        // TSX writes as `{/* note */}`. Oxfmt formats each one as that child, and the lift takes
+        // the braces off again, so a `//` keeps its own line and `b` never joins it.
         let source = concat!(
             "export function App({ a, b }) @{\n",
             "\t<div>\n",
@@ -890,9 +897,7 @@ mod tests {
                 "export function Plain() {\n",
                 "  return (\n",
                 "    <p>\n",
-                "      a /* x */ b\n",
-                "      <b />\n",
-                "      // c\n",
+                "      a /* x */ b<b /> // c\n",
                 "      d\n",
                 "    </p>\n",
                 "  );\n",
@@ -905,57 +910,43 @@ mod tests {
     }
 
     #[test]
-    fn jsx_text_comments_keep_the_spaces_around_them() {
-        // Once a comment in JSX text is gone, the whitespace beside it is the text's edge
-        // whitespace, and where it touches a sibling on the same line it renders as a space.
-        // Wherever Oxfmt moves a held run's marker, that space must still render, and the run
-        // comes back in its authored order.
-        for (case, source, expected) in [
+    fn jsx_text_comments_keep_authored_spaces_and_line_endings() {
+        // Bugbot on tsrx-org/oxc#119: the lift took an authored `{" "}` beside a comment for
+        // Oxfmt's spacer and dropped the space, and wrote comment runs back with LF line breaks
+        // in a CRLF file. The lift now only takes the braces off, in the file's line ending.
+        let source = "export function App() @{\n\t<p className=\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"><b>qqqqqqqqqqqqqqqqqqqqqqq</b>{\" \"}/* a */ xxxxxxxxxxxxxxxxxxxxx{\" \"}<i>y</i></p>\n}\n";
+        let first = format_text(Path::new("App.tsrx"), source).unwrap();
+        assert_eq!(
+            first.code,
+            "export function App() @{\n  <p className=\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\">\n    <b>qqqqqqqqqqqqqqqqqqqqqqq</b> /* a */ xxxxxxxxxxxxxxxxxxxxx <i>y</i>\n  </p>;\n}\n"
+        );
+        assert_eq!(format_text(Path::new("App.tsrx"), &first.code).unwrap().code, first.code);
+
+        let source = "export function App() @{\r\n\t<p>\r\n\t\ta /* one\r\n\t\ttwo */ b\r\n\t\t// c\r\n\t</p>\r\n}\r\n";
+        let options = root_options(&json!({ "endOfLine": "crlf" }));
+        let first =
+            format_text_with_options(Path::new("App.tsrx"), source, Some(&options)).unwrap();
+        assert!(first.code.contains("// c\r\n"), "{:?}", first.code);
+        assert_eq!(first.code.matches('\n').count(), first.code.matches("\r\n").count());
+        let second =
+            format_text_with_options(Path::new("App.tsrx"), &first.code, Some(&options)).unwrap();
+        assert_eq!(second.code, first.code);
+
+        // tsrx-org/oxc#126 review: a comment stays on the line the author wrote it on where
+        // Oxfmt broke it off, and a CR-only file keeps its text.
+        for (source, expected) in [
             (
-                "a line Oxfmt does not wrap stays byte for byte as written",
-                "export function App() @{\n  <p>a /* c */</p>;\n  <p>/* c */ a</p>;\n}\n",
-                "export function App() @{\n  <p>a /* c */</p>;\n  <p>/* c */ a</p>;\n}\n",
+                "export function App({ x }) @{\n\t<div>\n\t\t@if (x) {\n\t\t\t<i />\n\t\t} // e\n\t\t/* a *//* b */\n\t\t/*\n\t\t * x\n\t\t */\n\t\ty\n\t</div>\n}\n",
+                "export function App({ x }) @{\n  <div>\n    @if (x) {\n      <i />;\n    } // e\n    /* a *//* b */\n    /*\n     * x\n     */\n    y\n  </div>;\n}\n",
             ),
             (
-                "probe (a): the space after an edge comment still separates the tag from the text",
-                "export function App() @{\n\t<div className=\"aaaaaaaaaaaaaaaaaaaaaaaa\"><b>qqqqqqqqqqqqqqqqqqqqqqq</b>/* a */ xxxxxxxxxxxxxxxxxxxxx yyyyyyyyyyyy</div>\n}\n",
-                "export function App() @{\n  <div className=\"aaaaaaaaaaaaaaaaaaaaaaaa\">\n    <b>qqqqqqqqqqqqqqqqqqqqqqq</b>/* a */ xxxxxxxxxxxxxxxxxxxxx yyyyyyyyyyyy\n  </div>;\n}\n",
-            ),
-            (
-                "probe (b): the space before an edge comment still separates the text from the tag",
-                "export function App() @{\n\t<div className=\"aaaaaaaaaaaaaaaaaaaaaaaa\">xxxxxxxxxxxxxxxxxxxxx yyyyyyyyyyyy /* a */<b>qqqqqqqqqqqqqqqqqqqqqqq</b></div>\n}\n",
-                "export function App() @{\n  <div className=\"aaaaaaaaaaaaaaaaaaaaaaaa\">\n    xxxxxxxxxxxxxxxxxxxxx yyyyyyyyyyyy /* a */<b>qqqqqqqqqqqqqqqqqqqqqqq</b>\n  </div>;\n}\n",
-            ),
-            (
-                "probe (c): a leading space after the opening tag survives a run on lines of its own",
-                "export function App() @{\n\t<p>/* a */ x\n\ty</p>\n}\n",
-                "export function App() @{\n  <p>/* a */ x\n    y\n  </p>;\n}\n",
-            ),
-            (
-                "probe (d): both spaces between braced children and the text survive",
-                "export function App({ a }) @{\n\t<div className=\"aaaaaaaaaaaaaaaaaaaaaaaa\">{a}/* a */ yyyyyyyyyyyy /* b */{a}<b>qqqqqqqqqqqqqqqqqqqqqqq</b></div>\n}\n",
-                "export function App({ a }) @{\n  <div className=\"aaaaaaaaaaaaaaaaaaaaaaaa\">\n    {a}/* a */ yyyyyyyyyyyy /* b */{a}\n    <b>qqqqqqqqqqqqqqqqqqqqqqq</b>\n  </div>;\n}\n",
-            ),
-            (
-                "a long line Oxfmt breaks around an inline marker keeps both spaces on the text's line",
-                "export function App({ a }) @{\n\t<p><b>qqqqqqqqqqqqqqqqqqqq</b><b>qqqqqqqqqqqqqqqqqqqq</b>/* a */ x /* b */<b>qqqqqqqqqqqqqqqqqqqq</b><b>qqqqqqqqqqqqqqqqqqqq</b></p>\n}\n",
-                "export function App({ a }) @{\n  <p>\n    <b>qqqqqqqqqqqqqqqqqqqq</b>\n    <b>qqqqqqqqqqqqqqqqqqqq</b>/* a */ x /* b */<b>qqqqqqqqqqqqqqqqqqqq</b>\n    <b>qqqqqqqqqqqqqqqqqqqq</b>\n  </p>;\n}\n",
-            ),
-            (
-                "two spaces split by comments stay two spaces",
-                "export function App({ a }) @{\n\t<p><b>q</b>/* a */ /* b */ x /* c */ /* d */<i>w</i></p>\n}\n",
-                "export function App({ a }) @{\n  <p>\n    <b>q</b>/* a */ /* b */ x /* c */ /* d */<i>w</i>\n  </p>;\n}\n",
-            ),
-            (
-                "a run of only a comment and a space stays between its neighbours",
-                "export function App({ a }) @{\n\t<p>{a}/* a */ {a}</p>\n}\n",
-                "export function App({ a }) @{\n  <p>\n    {a}/* a */ {a}\n  </p>;\n}\n",
+                "export function App() @{\r\t<p>\r\t\ta // c\r\t\tb\r\t</p>\r}\r",
+                "export function App() @{\n  <p>\n    a // c\n    b\n  </p>;\n}\n",
             ),
         ] {
             let first = format_text(Path::new("App.tsrx"), source).unwrap();
-            assert_eq!(first.code, expected, "{case}");
-            let second = format_text(Path::new("App.tsrx"), &first.code).unwrap();
-            assert_eq!(second.code, first.code, "{case}: idempotent");
+            assert_eq!(first.code, expected);
+            assert_eq!(format_text(Path::new("App.tsrx"), &first.code).unwrap().code, expected);
         }
     }
 

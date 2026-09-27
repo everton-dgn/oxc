@@ -334,13 +334,10 @@ pub struct Overlay {
     /// ascending order. Each one needs a projected `;` so the legal-TSX lane reads the same
     /// statement boundary the TSRX scanner did.
     pub(crate) statement_boundaries: Vec<u32>,
-    /// JavaScript comments in JSX text (`//` from the start of a line or of a text run to the
-    /// line break, `/* ... */` anywhere), in source order. The parser and lint projections keep
-    /// them out of the text OXC reads.
+    /// JavaScript comments in JSX text (`//` after whitespace or at the start of a text run, to
+    /// the line break; `/* ... */` anywhere), in source order. Every projection writes each one
+    /// in braces, the `{/* ... */}` child TSX reads as a comment.
     pub(crate) jsx_text_comments: Vec<ByteSpan>,
-    /// Each JSX text run that holds a comment, trimmed of edge whitespace that holds a line
-    /// break, in source order. The formatter projection holds each run out of Oxfmt whole.
-    pub(crate) jsx_text_comment_runs: Vec<ByteSpan>,
     pub(crate) implicit_closes: Vec<ImplicitClose>,
     pub(crate) first_root: u32,
     pub(crate) last_root: u32,

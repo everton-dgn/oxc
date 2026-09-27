@@ -10,8 +10,8 @@ use oxc_adapter::{
     },
 };
 use tsrx_syntax::{
-    ImplicitClose, ImplicitCloser, Overlay, OverlayView, PARSER_RECOVERY_DIAGNOSTIC,
-    ProjectionView, project_for_parser, recover_for_parser, scan_for_parser,
+    ImplicitClose, Overlay, OverlayView, PARSER_RECOVERY_DIAGNOSTIC, ProjectionView,
+    SyntheticAnchor, project_for_parser, recover_for_parser, scan_for_parser,
 };
 use tsrx_tape_schema::{
     CommentTable, DiagnosticPhase, DiagnosticSeverity, DiagnosticTable, FlatTape, ModuleTable,
@@ -209,7 +209,6 @@ fn parse_tsrx_utf8_source_once<W: Utf16WorkObserver>(
         && overlay_view.style_blocks.is_empty()
         && overlay_view.script_blocks.is_empty()
         && overlay_view.jsx_text_comments.is_empty()
-        && overlay_view.implicit_closes.is_empty()
     {
         return parse_direct(
             source,
@@ -422,7 +421,7 @@ fn parse_projected<W: Utf16WorkObserver>(
         filename: options.filename,
         overlay: overlay_view,
         projection: projection_view,
-        implicit_closers: projected.implicit_closers(),
+        anchors: projected.anchors(),
         prefix,
         tape,
         projected_module,
@@ -471,7 +470,7 @@ struct ProjectedCompletion<'source, 'filename, 'overlay, 'projection> {
     filename: &'filename str,
     overlay: OverlayView<'overlay>,
     projection: ProjectionView<'projection>,
-    implicit_closers: &'projection [ImplicitCloser],
+    anchors: &'projection [SyntheticAnchor],
     prefix: &'projection str,
     tape: FlatTape,
     projected_module: Option<ModuleTable>,
@@ -523,7 +522,7 @@ impl ProjectedCompletion<'_, '_, '_, '_> {
         finalize_reachable_spans(
             &mut self.tape,
             self.projection.segments,
-            self.implicit_closers,
+            self.anchors,
             &authored_starts,
             &finalization_index,
         )?;

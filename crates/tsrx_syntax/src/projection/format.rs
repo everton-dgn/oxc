@@ -44,49 +44,20 @@ pub(super) struct StyleManifest {
     pub(super) payload: ByteSpan,
 }
 
-/// One JSX text run the formatter projection held out of Oxfmt because it holds a comment.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct TextRunManifest {
-    /// The run as authored.
-    pub(super) authored: String,
-    /// The offset in `authored` of the space the projection moved out in front of the marker.
-    pub(super) hoisted_before: Option<usize>,
-    /// The offset in `authored` of the space the projection moved out behind the marker.
-    pub(super) hoisted_after: Option<usize>,
-    pub(super) before: RunEdge,
-    pub(super) after: RunEdge,
-}
-
-impl TextRunManifest {
-    /// The run as the lift writes it back: as authored, less each moved-out space the lift
-    /// leaves where Oxfmt printed it.
-    pub(super) fn payload(&self, keep_before: bool, keep_after: bool) -> String {
-        let mut payload = String::with_capacity(self.authored.len());
-        let mut copied = 0;
-        let dropped = [
-            self.hoisted_before.filter(|_| !keep_before),
-            self.hoisted_after.filter(|_| !keep_after),
-        ];
-        for space in dropped.into_iter().flatten() {
-            payload.push_str(&self.authored[copied..space]);
-            copied = space + 1;
-        }
-        payload.push_str(&self.authored[copied..]);
-        payload
-    }
-}
-
-/// What separates a held run from its neighbour on one side.
+/// What separates a comment in JSX text from its neighbour on one side, as authored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum RunEdge {
-    /// Layout, or text: Oxfmt may break the line there.
-    Plain,
-    /// A significant space, authored there or moved out of the run. Where Oxfmt breaks the line
-    /// at it, the lift puts the space back on the line of the text it separates.
-    Spaced,
-    /// Nothing, and the run has no text: a line break there would turn its spaces into layout,
-    /// so the lift keeps the run on its neighbour's line.
+pub(super) enum Gap {
     Glued,
+    Spaced,
+    Layout,
+}
+
+fn gap(spaces: usize, next: Option<char>) -> Gap {
+    match next {
+        None | Some('\n' | '\r') => Gap::Layout,
+        _ if spaces > 0 => Gap::Spaced,
+        _ => Gap::Glued,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,8 +104,9 @@ pub struct FormatProjection {
     pub(super) dynamic_comments: Vec<ByteSpan>,
     pub(super) styles: Vec<StyleManifest>,
     pub(super) scripts: Vec<ScriptManifest>,
-    /// The JSX text runs that hold a comment, as the lift writes them back.
-    pub(super) text_comment_runs: Vec<TextRunManifest>,
+    /// What the author wrote before and after each comment in JSX text, which the projection
+    /// wrote in marked braces.
+    pub(super) text_comments: Vec<[Gap; 2]>,
     pub(super) parser_code_blocks: Vec<ParserCodeBlock>,
     pub(super) parser_shorthand_attributes: Vec<ParserShorthandAttribute>,
     pub(super) shape_fingerprint: u128,
@@ -153,7 +125,7 @@ impl FormatProjection {
             + self.dynamic_comments.len()
             + self.styles.len()
             + self.scripts.len()
-            + self.text_comment_runs.len()
+            + self.text_comments.len()
             + self.parser_code_blocks.len()
             + self.parser_shorthand_attributes.len()
     }
@@ -224,7 +196,20 @@ pub fn project_for_format(
         dynamic_comments: overlay.dynamic_comments.clone(),
         styles,
         scripts,
-        text_comment_runs: built.text_comment_payloads,
+        text_comments: overlay
+            .jsx_text_comments
+            .iter()
+            .map(|comment| {
+                let (before, after) =
+                    (&source[..comment.start as usize], &source[comment.end as usize..]);
+                let (left, right) =
+                    (before.trim_end_matches([' ', '\t']), after.trim_start_matches([' ', '\t']));
+                [
+                    gap(before.len() - left.len(), left.chars().next_back()),
+                    gap(0, right.chars().next()),
+                ]
+            })
+            .collect(),
         parser_code_blocks: overlay.parser_code_blocks.clone(),
         parser_shorthand_attributes: overlay.parser_shorthand_attributes.clone(),
         shape_fingerprint: structural_fingerprint(overlay),

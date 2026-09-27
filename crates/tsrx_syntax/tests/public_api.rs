@@ -674,16 +674,16 @@ fn unicode_identifier_suffixes_do_not_form_tsrx_controls() {
 
 #[test]
 fn jsx_text_comments_are_scanned_before_tags_and_braces() {
-    // `@tsrx/core` 0.5: `/* ... */` is a comment anywhere in JSX text, and `//` where only
-    // whitespace precedes it on its line or in its run of text, so `a // b` is text.
-    let source = "export function App() @{\n\t<p>a /* { */ b // c\n\t\t// <b>x</b>\n\t\t{a}// d\n\t\t</p>\n}";
+    // `@tsrx/core` 0.5: `/* ... */` is a comment anywhere in JSX text, and `//` where whitespace
+    // comes right before it or it starts a run of text, so `a//b` and `/* e */// f` are text.
+    let source = "export function App() @{\n\t<p>a /* { */ b // c\n\t\t// <b>x</b>\n\t\t{a}// d\n\t\ta//b /* e */// f\n\t\t</p>\n}";
     let overlay = tsrx_syntax::scan_for_parser(source).expect("scan");
     let comments = overlay
         .jsx_text_comments()
         .iter()
         .map(|span| &source[span.start as usize..span.end as usize])
         .collect::<Vec<_>>();
-    assert_eq!(comments, ["/* { */", "// <b>x</b>", "// d"]);
+    assert_eq!(comments, ["/* { */", "// c", "// <b>x</b>", "// d", "/* e */"]);
     assert!(overlay.implicit_closes().is_empty());
 
     // A comment that swallows a closing tag leaves its element to end at the `}` that closes

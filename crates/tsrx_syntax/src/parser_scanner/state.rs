@@ -38,7 +38,6 @@ pub(crate) struct Scanner<'a> {
     pub(super) markup_statements: Vec<u32>,
     /// JavaScript comments in JSX text, in source order; see [`Overlay`].
     pub(super) jsx_text_comments: Vec<ByteSpan>,
-    pub(super) jsx_text_comment_runs: Vec<ByteSpan>,
     pub(super) implicit_closes: Vec<ImplicitClose>,
     pub(super) first_root: u32,
     pub(super) last_root: u32,
@@ -66,7 +65,6 @@ impl<'a> Scanner<'a> {
             statement_boundaries: Vec::new(),
             markup_statements: Vec::new(),
             jsx_text_comments: Vec::new(),
-            jsx_text_comment_runs: Vec::new(),
             implicit_closes: Vec::new(),
             first_root: NONE,
             last_root: NONE,

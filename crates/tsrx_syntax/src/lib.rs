@@ -19,7 +19,7 @@ pub use model::{
     ParserShorthandAttribute, ScriptBlock, StructuralKind, StructuralToken, unclosed_tag_message,
 };
 pub use parser_projection::{
-    ImplicitCloser, MappedProjection as ParserProjection, project_for_parser,
+    MappedProjection as ParserProjection, SyntheticAnchor, project_for_parser,
 };
 pub use parser_recovery::{PARSER_RECOVERY_DIAGNOSTIC, ParserRecovery, recover_for_parser};
 pub use parser_scanner::OpaqueSurrogateContext;

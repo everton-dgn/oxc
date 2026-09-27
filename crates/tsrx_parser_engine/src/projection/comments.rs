@@ -7,7 +7,7 @@ use tsrx_tape_schema::{CommentTable, ProjectedCommentKind, TapeSpan};
 use crate::TsrxParseError;
 
 use super::{
-    mapping::map_affine_span,
+    mapping::{map_affine_span, map_endpoint},
     marker::parse_marker,
     marker_validation::MarkerValidation,
     text::{packed_string, slice},
@@ -25,9 +25,6 @@ pub(crate) fn reconstruct_comments<'a>(
     let mut markers = MarkerValidation::new(overlay)?;
     let mut prefix = expected_prefix;
     let mut authored_comments = CommentTable::default();
-    // Comments in JSX text never reach OXC; the projection wrote them as whitespace. They join
-    // the table in source order.
-    let mut text_comments = overlay.jsx_text_comments.iter().copied().peekable();
     let projected_records = comments.take_records();
     let projected_strings = comments.take_string_storage()?;
     debug_assert!(comments.is_storage_released());
@@ -54,17 +51,28 @@ pub(crate) fn reconstruct_comments<'a>(
                     "authored comment differs from its affine projection",
                 ));
             }
-            while let Some(text_comment) =
-                text_comments.next_if(|text_comment| text_comment.start < mapped_span.start)
-            {
-                push_text_comment(&mut authored_comments, authored, text_comment)?;
-            }
             authored_comments.push(
                 comment.kind,
                 mapped_span,
                 value.ok_or(TsrxParseError::Unsupported(
                     "authored comment delimiters are malformed",
                 ))?,
+            )?;
+            continue;
+        }
+        // A `//` comment in JSX text holding U+2028 or U+2029, written inside `/* ... */`.
+        if comment.kind == ProjectedCommentKind::Block
+            && let (Some(start), Some(end)) = (
+                map_endpoint(segments, comment.span.start + 2, true),
+                map_endpoint(segments, comment.span.end.saturating_sub(2), false),
+            )
+            && overlay.jsx_text_comments.iter().any(|text| (text.start, text.end) == (start, end))
+        {
+            let span = TapeSpan::new(start, end);
+            authored_comments.push(
+                ProjectedCommentKind::Line,
+                span,
+                slice(authored, start + 2, end)?,
             )?;
             continue;
         }
@@ -86,9 +94,6 @@ pub(crate) fn reconstruct_comments<'a>(
         markers.record(marker, &comment, authored, projected, segments, overlay)?;
     }
     drop(projected_strings);
-    for text_comment in text_comments {
-        push_text_comment(&mut authored_comments, authored, text_comment)?;
-    }
     if require_complete_markers && !markers.is_complete(overlay) {
         return Err(TsrxParseError::Unsupported("incomplete projection marker set"));
     }
@@ -102,23 +107,4 @@ pub(crate) fn reconstruct_comments<'a>(
         }
     }
     Ok((prefix, authored_comments))
-}
-
-fn push_text_comment(
-    comments: &mut CommentTable,
-    authored: &str,
-    span: tsrx_syntax::ByteSpan,
-) -> Result<(), TsrxParseError> {
-    let text = slice(authored, span.start, span.end)?;
-    let (kind, value) = if let Some(value) = text.strip_prefix("//") {
-        (ProjectedCommentKind::Line, value)
-    } else {
-        let value = text
-            .strip_prefix("/*")
-            .and_then(|value| value.strip_suffix("*/"))
-            .ok_or(TsrxParseError::Unsupported("JSX text comment delimiters are malformed"))?;
-        (ProjectedCommentKind::Block, value)
-    };
-    comments.push(kind, TapeSpan::new(span.start, span.end), value)?;
-    Ok(())
 }
