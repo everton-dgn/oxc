@@ -1,14 +1,14 @@
 //! Restoring the JSX text runs the formatter projection held out of Oxfmt because they hold a
 //! comment. `@tsrx/core` 0.5 reads a JavaScript comment in JSX text as a comment, which TSX does
 //! not, so Oxfmt would reflow such a run as plain words and could join a line comment onto the
-//! text after it. Each run comes back as authored (less any significant edge whitespace the
-//! projection moved out beside the marker), with its continuation lines re-indented to the line
-//! Oxfmt placed its marker on.
+//! text after it. Each run comes back as authored, with its continuation lines re-indented to the
+//! line Oxfmt placed its marker on. A significant edge space the projection moved out beside the
+//! marker goes back into the run wherever it stays on the run's line.
 
 use crate::diagnostics::ProjectionError;
 
 use super::{
-    super::format::{FormatProjection, RunEdge},
+    super::format::{FormatProjection, RunEdge, TextRunManifest},
     text::{parse_decimal, skip_ascii_whitespace},
 };
 
@@ -28,7 +28,6 @@ pub(super) fn lift_text_comment_runs(
             parse_decimal(bytes, marker + needle.len()).ok_or(ProjectionError::MarkerResidual)?;
         let index = ordinal as usize;
         let run = projection.text_comment_runs.get(index).ok_or(ProjectionError::MarkerResidual)?;
-        let payload = run.payload.as_str();
         if restored[index] || bytes.get(digits_end..digits_end + 2) != Some(b"__") {
             return Err(ProjectionError::ScaffoldMismatch { index });
         }
@@ -37,65 +36,27 @@ pub(super) fn lift_text_comment_runs(
             return Err(ProjectionError::ScaffoldMismatch { index });
         }
         let indent = line_indentation(source, open);
-        // A significant space beside the marker (the projection moves the run's own out there).
-        // Where Oxfmt broke the line at it, it wrote the space as `{" "}` at the line's edge; the
-        // space goes back onto the line of the text it separates, where it was authored.
-        let mut open = open;
-        let mut close = close;
-        let mut joined_leading = false;
-        if run.before == RunEdge::Spaced
-            && let Some(space) = spacer_before(source, open)
-            && let Some(previous) =
-                source[..space].rfind(|character: char| !character.is_ascii_whitespace())
-            && previous + 1 >= copied
-        {
-            open = previous + 1;
-            joined_leading = true;
-        }
-        if run.before == RunEdge::Glued
-            && let Some(previous) =
-                source[..open].rfind(|character: char| !character.is_ascii_whitespace())
-            && previous + 1 >= copied
-            && source[previous + 1..open].contains(['\n', '\r'])
-        {
-            open = previous + 1;
-        }
-        let mut joined_trailing = None;
-        if run.after == RunEdge::Glued {
-            let next = close
-                + source[close..]
-                    .find(|character: char| !character.is_ascii_whitespace())
-                    .unwrap_or(source.len() - close);
-            if source[close..next].contains(['\n', '\r']) && next < source.len() {
-                close = next;
-            }
-        } else if run.after == RunEdge::Spaced && source[close..].starts_with(SPACER) {
-            let after = close + SPACER.len();
-            let next = after
-                + source[after..]
-                    .find(|character: char| !character.is_ascii_whitespace())
-                    .unwrap_or(source.len() - after);
-            if source[after..next].contains(['\n', '\r']) && next < source.len() {
-                joined_trailing = Some(next);
-            }
-        }
-        output.push_str(&source[copied..open]);
-        if joined_leading {
+        let leading = leading_edge(source, open, copied, run);
+        let trailing = trailing_edge(source, close, run);
+        let close = trailing.end;
+        output.push_str(&source[copied..leading.end]);
+        if leading.space {
             output.push(' ');
         }
+        let payload = run.payload(leading.keep_hoisted, trailing.keep_hoisted);
+        let payload = payload.as_str();
         // Where Oxfmt put the marker on a line of its own, the run's leading spaces sit next to
         // a line break and are layout.
-        let payload = if source[..open].ends_with(indent)
-            && source[..open.saturating_sub(indent.len())].ends_with(['\n', '\r'])
+        let payload = if source[..leading.end].ends_with(indent)
+            && source[..leading.end.saturating_sub(indent.len())].ends_with(['\n', '\r'])
         {
             payload.trim_start_matches([' ', '\t'])
         } else {
             payload
         };
         push_reindented(&mut output, payload, indent);
-        if let Some(next) = joined_trailing {
+        if trailing.space {
             output.push(' ');
-            close = next;
         }
         // A run that ends in a line comment needs a line break before whatever follows it.
         if ends_in_line_comment(payload)
@@ -114,6 +75,81 @@ pub(super) fn lift_text_comment_runs(
         return Err(ProjectionError::ScaffoldMismatch { index });
     }
     Ok(output)
+}
+
+/// How the lift closes one side of a held run.
+struct Edge {
+    /// Where authored output stops before the run, or resumes after it.
+    end: usize,
+    /// A space to write between the run and its neighbour.
+    space: bool,
+    /// The space the projection moved out on this side goes back into the run.
+    keep_hoisted: bool,
+}
+
+/// A significant space before the marker. Where Oxfmt printed a moved-out space right beside the
+/// marker, it goes back where it was authored, so an unwrapped line keeps its bytes. Where Oxfmt
+/// broke the line at it and wrote `{" "}` at the line's edge, the space goes back onto the line
+/// of the text it separates. A run of spaces and comments alone stays on its neighbour's line.
+fn leading_edge(source: &str, open: usize, copied: usize, run: &TextRunManifest) -> Edge {
+    let previous_text = |end: usize| {
+        source[..end]
+            .rfind(|character: char| !character.is_ascii_whitespace())
+            .map(|index| index + 1)
+            .filter(|index| *index >= copied)
+    };
+    if let Some(space) = run.hoisted_before
+        && let Some(before) = open.checked_sub(1)
+        && before >= copied
+        && source[before..open] == run.authored[space..=space]
+        && source[..before].chars().next_back().is_some_and(|c| !c.is_ascii_whitespace())
+    {
+        return Edge { end: before, space: false, keep_hoisted: true };
+    }
+    if run.before == RunEdge::Spaced
+        && let Some(spacer) = spacer_before(source, open)
+        && let Some(end) = previous_text(spacer)
+    {
+        let hoisted = run.hoisted_before.is_some();
+        return Edge { end, space: !hoisted, keep_hoisted: hoisted };
+    }
+    if run.before == RunEdge::Glued
+        && let Some(end) = previous_text(open)
+        && source[end..open].contains(['\n', '\r'])
+    {
+        return Edge { end, space: false, keep_hoisted: false };
+    }
+    Edge { end: open, space: false, keep_hoisted: false }
+}
+
+/// The same after the marker's `}` at `close`.
+fn trailing_edge(source: &str, close: usize, run: &TextRunManifest) -> Edge {
+    let next_text = |from: usize| {
+        let next = from
+            + source[from..]
+                .find(|character: char| !character.is_ascii_whitespace())
+                .unwrap_or(source.len() - from);
+        (source[from..next].contains(['\n', '\r']) && next < source.len()).then_some(next)
+    };
+    if let Some(space) = run.hoisted_after
+        && source.get(close..=close) == Some(&run.authored[space..=space])
+        && source[close + 1..].chars().next().is_some_and(|c| !c.is_ascii_whitespace())
+    {
+        return Edge { end: close + 1, space: false, keep_hoisted: true };
+    }
+    if run.after == RunEdge::Glued
+        && let Some(end) = next_text(close)
+    {
+        return Edge { end, space: false, keep_hoisted: false };
+    }
+    if run.after == RunEdge::Spaced
+        && source[close..].starts_with(SPACER)
+        && let Some(end) = next_text(close + SPACER.len())
+    {
+        let hoisted = run.hoisted_after.is_some();
+        return Edge { end, space: !hoisted, keep_hoisted: hoisted };
+    }
+    Edge { end: close, space: false, keep_hoisted: false }
 }
 
 /// Oxfmt's spelling of a significant JSX space at a line break.

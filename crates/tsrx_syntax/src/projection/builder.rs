@@ -211,8 +211,8 @@ impl<'a> Builder<'a> {
     ///
     /// Whitespace between a comment at the run's edge and its text is the text's edge whitespace
     /// once the comment is gone. Where it is significant (no line break around it), it moves out
-    /// in front of or behind the marker, where Oxfmt keeps it wherever it puts the marker, and
-    /// the restored run leaves it out: `</b>/* a */ x` becomes `</b> /* a */x`.
+    /// in front of or behind the marker, where Oxfmt keeps it wherever it puts the marker. The
+    /// lift puts it back where it was authored wherever it stays on the run's line.
     fn text_comment_run_marker(&mut self, run: ByteSpan) -> Result<(), ProjectionError> {
         let ordinal = self.text_comment;
         let bytes = self.source.as_bytes();
@@ -223,22 +223,11 @@ impl<'a> Builder<'a> {
         let comments = &comments[first..last];
         let edges = run_edges(bytes, run, comments);
 
-        let mut payload = String::with_capacity((run.end - run.start) as usize);
-        let mut copied = run.start as usize;
-        for space in edges.hoisted_before.iter().chain(&edges.hoisted_after) {
-            payload.push_str(
-                self.source
-                    .get(copied..*space)
-                    .ok_or(ProjectionError::SourceChanged { offset: run.start })?,
-            );
-            copied = space + 1;
-        }
-        payload.push_str(
-            self.source
-                .get(copied..run.end as usize)
-                .ok_or(ProjectionError::SourceChanged { offset: run.start })?,
-        );
-        let own_lines = payload.contains(['\n', '\r'])
+        let authored = self
+            .source
+            .get(run.start as usize..run.end as usize)
+            .ok_or(ProjectionError::SourceChanged { offset: run.start })?;
+        let own_lines = authored.contains(['\n', '\r'])
             || comments.iter().any(|comment| bytes.get(comment.start as usize + 1) == Some(&b'/'));
         if let Some(space) = edges.hoisted_before {
             self.output.push_str(&self.source[space..=space]);
@@ -253,7 +242,9 @@ impl<'a> Builder<'a> {
             self.output.push_str(&self.source[space..=space]);
         }
         self.text_comment_payloads.push(TextRunManifest {
-            payload,
+            authored: authored.to_owned(),
+            hoisted_before: edges.hoisted_before.map(|space| space - run.start as usize),
+            hoisted_after: edges.hoisted_after.map(|space| space - run.start as usize),
             before: edges.before,
             after: edges.after,
         });
@@ -806,7 +797,8 @@ struct RunEdges {
 /// its text is the text's edge whitespace once the comment is gone. Where it is significant (no
 /// line break in it) and the run has no authored whitespace beside it (Oxfmt prints a run of JSX
 /// spaces as one), one space of it moves out beside the marker, where Oxfmt keeps it wherever it
-/// puts the marker: `</b>/* a */ x` becomes `</b> /* a */x`.
+/// puts the marker. The lift puts it back where it was authored wherever it stays on the run's
+/// line, so `</b>/* a */ x` comes back as written.
 fn run_edges(bytes: &[u8], run: ByteSpan, comments: &[ByteSpan]) -> RunEdges {
     let is_space = |byte: &u8| matches!(byte, b' ' | b'\t' | b'\n' | b'\r');
     let is_line_break = |byte: &u8| matches!(byte, b'\n' | b'\r');

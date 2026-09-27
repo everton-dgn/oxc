@@ -47,10 +47,33 @@ pub(super) struct StyleManifest {
 /// One JSX text run the formatter projection held out of Oxfmt because it holds a comment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct TextRunManifest {
-    /// The run as the lift writes it back.
-    pub(super) payload: String,
+    /// The run as authored.
+    pub(super) authored: String,
+    /// The offset in `authored` of the space the projection moved out in front of the marker.
+    pub(super) hoisted_before: Option<usize>,
+    /// The offset in `authored` of the space the projection moved out behind the marker.
+    pub(super) hoisted_after: Option<usize>,
     pub(super) before: RunEdge,
     pub(super) after: RunEdge,
+}
+
+impl TextRunManifest {
+    /// The run as the lift writes it back: as authored, less each moved-out space the lift
+    /// leaves where Oxfmt printed it.
+    pub(super) fn payload(&self, keep_before: bool, keep_after: bool) -> String {
+        let mut payload = String::with_capacity(self.authored.len());
+        let mut copied = 0;
+        let dropped = [
+            self.hoisted_before.filter(|_| !keep_before),
+            self.hoisted_after.filter(|_| !keep_after),
+        ];
+        for space in dropped.into_iter().flatten() {
+            payload.push_str(&self.authored[copied..space]);
+            copied = space + 1;
+        }
+        payload.push_str(&self.authored[copied..]);
+        payload
+    }
 }
 
 /// What separates a held run from its neighbour on one side.
