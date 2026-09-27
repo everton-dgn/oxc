@@ -399,10 +399,17 @@ test("TSRX compatibility restores parser metadata and unwraps parenthesized expr
                 end: 0,
                 body: [
                   {
-                    type: "ExpressionStatement",
+                    type: "BlockStatement",
                     start: 0,
                     end: 0,
-                    expression: { type: "Identifier", name: "view", start: 0, end: 0 },
+                    body: [
+                      {
+                        type: "ExpressionStatement",
+                        start: 0,
+                        end: 0,
+                        expression: { type: "Identifier", name: "view", start: 0, end: 0 },
+                      },
+                    ],
                   },
                 ],
               },
@@ -436,7 +443,8 @@ test("TSRX compatibility restores parser metadata and unwraps parenthesized expr
     allows_native_return: false,
   });
   assert.deepEqual(program.body[2].alternate.metadata, program.body[2].consequent.metadata);
-  assert.deepEqual(program.body[3].cases[0].consequent[0], {
+  assert.deepEqual(program.body[3].cases[0].consequent[0].metadata, program.body[2].consequent.metadata);
+  assert.deepEqual(program.body[3].cases[0].consequent[0].body[0], {
     type: "JSXExpressionContainer",
     start: 0,
     end: 0,

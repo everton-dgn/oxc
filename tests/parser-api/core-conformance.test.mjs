@@ -4,7 +4,7 @@ import test from "node:test";
 import { parseModule } from "../../packages/tsrx-core-compat/dist/index.js";
 
 // Regression tests for the @tsrx/core 0.5.0 conformance issues tsrx-org/oxc #110, #112, #113,
-// #114, #115, #116, and #118. Every expected value below is what @tsrx/core 0.5.0 (tsrx main at
+// #114, #115, #116, #118, #125, #127, and #128. Every expected value below is what @tsrx/core 0.5.0 (tsrx main at
 // f78fada) returns for the same source, so a difference here is a difference from the reference
 // parser.
 
@@ -752,4 +752,123 @@ test("#113: merging, shadowing, overloads, and template scopes core accepts stay
     assert.deepEqual(recordedErrors(source, "collect"), [], source);
     assert.deepEqual(recordedErrors(source, "loose"), [], source);
   }
+});
+
+const first = (ast, type) => findAll(ast, (node) => node.type === type)[0];
+
+test("#125: a type parameter's name is an Identifier with its position", () => {
+  // [source, name, start, line, column of the name, the type parameter's start and end]
+  const cases = [
+    ["function f<T>(x: T) {}", "T", 11, 1, 11, 11, 12],
+    ["class A<in /* c */ out T> {}", "T", 23, 1, 23, 8, 24],
+    ['function f<const T extends string = "a">() {}', "T", 17, 1, 17, 11, 39],
+    ["function f<\n  const /* c */ T,\n>() {}", "T", 28, 2, 16, 14, 29],
+    ["type M = { [K in keyof X]: X[K] };", "K", 12, 1, 12, 12, 24],
+    ["type M = {\n  readonly [/* c */ K in keyof X as `k${K}`]?: X[K];\n};", "K", 31, 2, 20, 31, 43],
+    ["type I = X extends Array<infer U> ? U : never;", "U", 31, 1, 31, 31, 32],
+    ["type I = X extends Array<infer U extends string> ? U : never;", "U", 31, 1, 31, 31, 47],
+  ];
+  for (const [source, name, start, line, column, parameterStart, parameterEnd] of cases) {
+    const parameter = first(parseModule(source, "App.tsrx"), "TSTypeParameter");
+    assert.deepEqual([parameter.start, parameter.end], [parameterStart, parameterEnd], source);
+    assert.deepEqual(
+      parameter.name,
+      {
+        type: "Identifier",
+        name,
+        start,
+        end: start + 1,
+        loc: { start: { line, column }, end: { line, column: column + 1 } },
+      },
+      source,
+    );
+  }
+  // A mapped type's key and constraint are its `typeParameter`, as in core.
+  const mapped = first(parseModule(cases[5][0], "App.tsrx"), "TSMappedType");
+  assert.deepEqual(Object.keys(mapped).sort(), [
+    "end", "loc", "nameType", "optional", "readonly", "start", "type", "typeAnnotation", "typeParameter",
+  ]);
+  assert.equal(mapped.typeParameter.constraint.type, "TSTypeOperator");
+});
+
+test("#127: an enum's members are in a TSEnumBody that spans its braces", () => {
+  // [source, the body's start, end, line, column, and member count]
+  const cases = [
+    ["enum E { A, B = 2 }", 7, 19, 1, 7, 2],
+    ["enum E /* c */ { A }", 15, 20, 1, 15, 1],
+    ["enum E // c\n{ A }", 12, 17, 2, 0, 1],
+    ["declare const enum E {}", 21, 23, 1, 21, 0],
+    ["export enum E {\n  A,\n}", 14, 22, 1, 14, 1],
+  ];
+  for (const [source, start, end, line, column, count] of cases) {
+    const declaration = first(parseModule(source, "App.tsrx"), "TSEnumDeclaration");
+    const { body } = declaration;
+    assert.equal(body.type, "TSEnumBody", source);
+    assert.deepEqual([body.start, body.end, body.loc.start], [start, end, { line, column }], source);
+    assert.equal(body.members.length, count, source);
+    assert.equal("members" in declaration, false, source);
+  }
+});
+
+const SWITCH_ARMS = `export function App({ x }) @{
+  @switch (x) {
+    @case 1: /* c */ {
+      const y = 1;
+      <b>{y}</b>
+    }
+    @case 2: {
+      {x}
+    }
+    @default: {
+      // only a comment
+    }
+  }
+}
+function g(x) {
+  switch (x) {
+    case 1: { f(); }
+    default: g();
+  }
+}`;
+
+test("#128: each @case and @default arm is one BlockStatement from its { to its }", () => {
+  const comments = [];
+  const ast = parseModule(SWITCH_ARMS, "App.tsrx", { collect: true, errors: [], comments });
+  const metadata = {
+    path: [],
+    native_tsrx_template_block: true,
+    templateMode: "script",
+    allows_native_return: false,
+  };
+  const arms = first(ast, "JSXSwitchExpression").cases.map(({ consequent }) => {
+    assert.equal(consequent.length, 1);
+    const [block] = consequent;
+    assert.equal(block.type, "BlockStatement");
+    assert.deepEqual(block.metadata, metadata);
+    return [block.start, block.end, block.loc.start, block.body.map(({ type }) => type)];
+  });
+  assert.deepEqual(arms, [
+    [67, 110, { line: 3, column: 21 }, ["VariableDeclaration", "JSXElement"]],
+    [124, 141, { line: 7, column: 13 }, ["JSXExpressionContainer"]],
+    [156, 187, { line: 10, column: 14 }, []],
+  ]);
+  // The empty arm's comment is inside its block.
+  const comment = comments.find(({ value }) => value === " only a comment");
+  assert.ok(comment.start > 156 && comment.end < 187);
+  // A JavaScript switch is unchanged.
+  const plain = first(ast, "SwitchStatement");
+  assert.deepEqual(
+    plain.cases.map(({ consequent }) => consequent.map(({ type }) => type)),
+    [["BlockStatement"], ["ExpressionStatement"]],
+  );
+});
+
+test("#128: each arm's block is a scope of its own", () => {
+  const arm = (body) => `export function App({ x }) @{\n  @switch (x) {\n${body}\n  }\n}`;
+  assert.equal(
+    strictError(arm("    @case 1: {\n      const y = 1;\n      <b>{y}</b>\n    }\n    @default: {\n      const y = 2;\n      <i>{y}</i>\n    }")),
+    null,
+  );
+  const error = strictError(arm("    @case 1: {\n      const y = 1;\n      let y;\n      <b>{y}</b>\n    }"));
+  assert.deepEqual([error[0], error[1]], ["Identifier 'y' has already been declared", 90]);
 });

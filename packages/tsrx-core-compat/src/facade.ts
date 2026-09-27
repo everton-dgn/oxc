@@ -1124,21 +1124,21 @@ function materializeDirectiveBlockMetadata(value) {
     stampTemplateBlock(value.handler?.body);
   } else if (value.type === "JSXSwitchExpression") {
     for (const switchCase of value.cases ?? []) {
-      for (let index = 0; index < (switchCase?.consequent?.length ?? 0); index += 1) {
-        const statement = switchCase.consequent[index];
+      const body = switchCase?.consequent?.[0]?.body ?? [];
+      stampTemplateBlock(switchCase?.consequent?.[0]);
+      for (let index = 0; index < body.length; index += 1) {
+        const statement = body[index];
         if (
           statement?.type === "BlockStatement" &&
           statement.body?.length === 1 &&
           statement.body[0]?.type === "ExpressionStatement"
         ) {
-          switchCase.consequent[index] = {
+          body[index] = {
             type: "JSXExpressionContainer",
             start: statement.start,
             end: statement.end,
             expression: statement.body[0].expression,
           };
-        } else {
-          stampTemplateBlock(statement);
         }
       }
     }
@@ -1291,6 +1291,14 @@ function materializeCompatibilityProgram(program, source, filename, loose, posit
       value.metadata ??= { path: [] };
       value.metadata.path ??= [];
       value.metadata.module_keyword = value.kind;
+    }
+
+    // Core gives a mapped type's key and constraint as one `typeParameter`, as acorn-typescript does.
+    if (value.type === "TSMappedType" && value.key != null) {
+      const { key, constraint } = value;
+      value.typeParameter = { type: "TSTypeParameter", name: key, constraint, start: key.start, end: constraint.end };
+      delete value.key;
+      delete value.constraint;
     }
 
     materializeDirectiveBlockMetadata(value);
@@ -1981,19 +1989,11 @@ function scopeDiagnostics(program, source) {
           node.empty,
         ]);
         return;
-      case "SwitchStatement": {
+      // An `@case`/`@default` arm is a BlockStatement, so it is a scope of its own.
+      case "SwitchStatement":
+      case "JSXSwitchExpression": {
         const sequence = [node.discriminant, enterBlock];
         for (const clause of node.cases ?? []) sequence.push(clause?.test, clause?.consequent);
-        sequence.push(exit);
-        schedule(sequence);
-        return;
-      }
-      case "JSXSwitchExpression": {
-        // Each arm's braces are a scope of their own in core, like `@if`/`@else` bodies.
-        const sequence = [node.discriminant, enterBlock];
-        for (const clause of node.cases ?? []) {
-          sequence.push(clause?.test, enterBlock, clause?.consequent, exit);
-        }
         sequence.push(exit);
         schedule(sequence);
         return;
