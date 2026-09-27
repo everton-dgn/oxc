@@ -52,9 +52,19 @@ fn assert_case(
         Some(expected) => assert_eq!(span(tape, object_field(tape, case, "test")), expected),
         None => assert_eq!(tape.scalar(field(tape, case, "test")), Some("null")),
     }
-    list_field(tape, case, "consequent")
+    case_body(tape, case)
+}
+
+// An arm's consequent is one BlockStatement from its `{` to its `}`, as in @tsrx/core 0.5.
+fn case_body(tape: &FlatTape, case: RecordIndex) -> Vec<RecordIndex> {
+    let block = one_object(&list_field(tape, case, "consequent"));
+    require_type(tape, block, "BlockStatement");
+    assert_eq!(span(tape, block).1, span(tape, case).1);
+    assert_eq!(field_names(tape, block), ["type", "start", "end", "body", "metadata"]);
+    assert_empty_path(tape, block);
+    list_field(tape, block, "body")
         .into_iter()
-        .map(|value| value.as_object().expect("case consequent object"))
+        .map(|value| value.as_object().expect("case body object"))
         .collect()
 }
 
@@ -142,7 +152,7 @@ fn preserves_empty_switches_and_empty_case_consequents() {
 }
 
 #[test]
-fn preserves_default_first_source_order_and_flattens_clause_braces() {
+fn preserves_default_first_source_order_and_keeps_clause_braces_as_blocks() {
     let source =
         concat!("const x=@switch(kind){@default:{zero}", "@case 1:{const y=1;<b/>}@case 2:{two}};");
     let result = parse_tsrx(&TsrxParseRequest { source }).expect("ordered @switch");
@@ -181,7 +191,7 @@ fn promotes_a_terminal_statement_switch_to_code_block_render() {
 }
 
 #[test]
-fn composes_nested_if_and_for_controls_as_flat_case_consequents() {
+fn composes_nested_if_and_for_controls_inside_case_blocks() {
     let source = concat!(
         "function View() @{<main>@switch(kind){",
         "@case 1:{@if(ok){<b/>}@else{<i/>}}",
@@ -272,11 +282,10 @@ fn reconstructs_nested_switches_inside_out() {
     let outer = one_object(&list_field(tape, main, "children"));
     require_type(tape, outer, "JSXSwitchExpression");
     let outer_cases = cases(tape, outer);
-    let first = list_field(tape, outer_cases[0], "consequent");
-    let inner = one_object(&first);
+    let inner = one_object_value(&case_body(tape, outer_cases[0]));
     require_type(tape, inner, "JSXSwitchExpression");
     let inner_default = one_object_value(&cases(tape, inner));
-    let child = one_object(&list_field(tape, inner_default, "consequent"));
+    let child = one_object_value(&case_body(tape, inner_default));
     require_type(tape, child, "JSXElement");
     assert_no_scaffold(tape);
 }

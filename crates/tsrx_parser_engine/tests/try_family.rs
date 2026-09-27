@@ -382,7 +382,8 @@ fn reconstructs_try_inside_switch_and_nested_try_inside_out() {
     let code_block = object_field(inside_switch.program(), function, "body");
     let switch = object_field(inside_switch.program(), code_block, "render");
     let case = one_object(&list_field(inside_switch.program(), switch, "cases"));
-    let node = one_object(&list_field(inside_switch.program(), case, "consequent"));
+    let arm = one_object(&list_field(inside_switch.program(), case, "consequent"));
+    let node = one_object(&list_field(inside_switch.program(), arm, "body"));
     require_type(inside_switch.program(), node, "JSXTryExpression");
     assert_no_scaffold(inside_switch.program());
 

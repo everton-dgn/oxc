@@ -14,7 +14,7 @@ use crate::{
 
 use super::{
     access::{exact_one_value, field_value, list_field, object_field, require_type, scalar_u32},
-    control::{find_wrapper_call, place_control},
+    control::{find_wrapper_call, place_control, prepare_control_block},
     edits::{append_empty_metadata, order_span_fields_before, replace_type},
     objects::find_unique_start,
     spans::{AuthoredStart, require_authored_object_span},
@@ -139,21 +139,11 @@ impl SwitchReconstructor<'_, '_, '_> {
             }
         }
 
-        let consequent_field = tape
-            .field_index(case, "consequent")
-            .ok_or(TsrxParseError::Unsupported("switch case has no consequent"))?;
-        let consequent = tape
-            .field_value(consequent_field)
-            .and_then(ValueRef::as_list)
-            .ok_or(TsrxParseError::Unsupported("switch case consequent is not a list"))?;
-        let block = exact_one_value(tape, consequent)?
+        let block = exact_one_value(tape, list_field(tape, case, "consequent")?)?
             .as_object()
             .ok_or(TsrxParseError::Unsupported("projected case body is not a block"))?;
-        require_type(tape, block, r#""BlockStatement""#)?;
         require_authored_object_span(tape, block, self.segments, clause.body)?;
-        let body = list_field(tape, block, "body")?;
-        tape.set_field_value(consequent_field, ValueRef::list(body))?;
-        self.body_lists.push(body);
+        prepare_control_block(tape, block, self.body_lists)?;
         order_switch_case_fields(tape, case)?;
         self.starts.push(AuthoredStart { object: case, start: clause.keyword.start, end: None });
         Ok(())

@@ -78,6 +78,13 @@ fn block_statements(tape: &FlatTape, block: RecordIndex) -> Vec<RecordIndex> {
     objects(&list_field(tape, block, "body"))
 }
 
+// An `@case`/`@default` arm's statements, inside the one BlockStatement its consequent holds.
+fn case_statements(tape: &FlatTape, case: RecordIndex) -> Vec<RecordIndex> {
+    let consequent = objects(&list_field(tape, case, "consequent"));
+    assert_eq!(consequent.len(), 1);
+    block_statements(tape, consequent[0])
+}
+
 fn json_string(value: &str) -> String {
     format!("\"{value}\"")
 }
@@ -451,11 +458,11 @@ fn fragments_hold_style_and_output_inside_switch_cases() {
     assert_eq!(cases.len(), 2);
     require_type(tape, object_field(tape, cases[0], "test"), "Literal");
     assert_eq!(tape.scalar(field(tape, cases[1], "test")), Some("null"));
-    let first = objects(&list_field(tape, cases[0], "consequent"));
+    let first = case_statements(tape, cases[0]);
     let first_children = objects(&list_field(tape, first[0], "children"));
     assert_style_self(tape, first_children[0], &["apply"], Some("Identifier"));
     assert_element(tape, first_children[1], "b");
-    let default = objects(&list_field(tape, cases[1], "consequent"));
+    let default = case_statements(tape, cases[1]);
     let default_children = objects(&list_field(tape, default[0], "children"));
     assert_element(tape, default_children[0], "i");
     assert_style_self(tape, default_children[1], &["apply"], Some("Identifier"));
@@ -615,9 +622,9 @@ fn raw_style_in_a_switch_case_does_not_break_the_following_case() {
     require_type(tape, switch, "JSXSwitchExpression");
     let cases = objects(&list_field(tape, switch, "cases"));
     assert_eq!(cases.len(), 2);
-    let first = objects(&list_field(tape, cases[0], "consequent"));
+    let first = case_statements(tape, cases[0]);
     assert_style_body(tape, first[0], ".a{color:red}", &[], None);
-    let second = objects(&list_field(tape, cases[1], "consequent"));
+    let second = case_statements(tape, cases[1]);
     assert_element(tape, second[0], "div");
     assert_no_scaffold(tape);
 }

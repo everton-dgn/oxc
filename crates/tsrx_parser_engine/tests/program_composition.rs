@@ -918,8 +918,10 @@ fn nested_code_blocks_follow_their_completed_owner_policies() {
     let outer = program_body(tape)[0].as_object().expect("Outer");
     let control = rendered(tape, code_block(tape, outer));
     let case = list_field(tape, control, "cases")[0].as_object().expect("default case");
+    let arm = list_field(tape, case, "consequent")[0].as_object().expect("default case block");
+    require_type(tape, arm, "BlockStatement");
     let statement =
-        list_field(tape, case, "consequent")[0].as_object().expect("wrapped nested code block");
+        list_field(tape, arm, "body")[0].as_object().expect("wrapped nested code block");
     require_type(tape, statement, "ExpressionStatement");
     require_type(tape, object_field(tape, statement, "expression"), "JSXCodeBlock");
     assert_no_scaffold(tape);
