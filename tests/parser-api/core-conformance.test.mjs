@@ -50,7 +50,7 @@ const children = (ast) =>
         ? (assert.equal(child.raw, child.value), [child.value, child.start, child.end])
         : child.expression?.type === "JSXEmptyExpression"
           ? (assert.deepEqual([child.expression.start, child.expression.end], [child.start, child.end]),
-            ["{}", child.start, child.end])
+            ["{}", child.start, child.end, child.expression.innerComments.map(({ type, value }) => [type, value])])
           : child.openingElement.name.name,
     ),
   );
@@ -62,42 +62,47 @@ test("#118: an element's children have TSX's shape, with each comment an empty {
     [
       "export function App() @{\n\t<p>\n\t\ta\n\t\t// note\n\t\tb\n\t</p>\n}",
       "App.tsrx",
-      [[["\n\t\ta\n\t\t", 29, 36], ["{}", 36, 43], ["\n\t\tb\n\t", 43, 49]]],
+      [[["\n\t\ta\n\t\t", 29, 36], ["{}", 36, 43, [["Line", " note"]]], ["\n\t\tb\n\t", 43, 49]]],
     ],
     [
       "export function App() {\n\treturn <p>a /* note */ b</p>;\n}",
       "App.tsrx",
-      [[["a ", 35, 37], ["{}", 37, 47], [" b", 47, 49]]],
+      [[["a ", 35, 37], ["{}", 37, 47, [["Block", " note "]]], [" b", 47, 49]]],
     ],
     [
       "export function App({ a }) @{\n\t<div>\n\t\t// <b>x</b>\n\t\t<i>y</i>\n\t</div>\n}",
       "App.tsrx",
-      [[["\n\t\t", 36, 39], ["{}", 39, 50], ["\n\t\t", 50, 53], "i", ["\n\t", 61, 63]], [["y", 56, 57]]],
+      [[["\n\t\t", 36, 39], ["{}", 39, 50, [["Line", " <b>x</b>"]]], ["\n\t\t", 50, 53], "i", ["\n\t", 61, 63]], [["y", 56, 57]]],
     ],
     [
       "export function App() {\n\treturn <div>a /* } */ b</div>;\n}",
       "App.tsrx",
-      [[["a ", 37, 39], ["{}", 39, 46], [" b", 46, 48]]],
+      [[["a ", 37, 39], ["{}", 39, 46, [["Block", " } "]]], [" b", 46, 48]]],
     ],
     [
       "export function App() @{\n\t<p>see http://<b>x</b> a//b /* a */// b &#47;* c</p>\n}",
       "App.tsrx",
-      [[["see http://", 29, 40], "b", [" a//b ", 48, 54], ["{}", 54, 61], ["// b &#47;* c", 61, 74]], [["x", 43, 44]]],
+      [[["see http://", 29, 40], "b", [" a//b ", 48, 54], ["{}", 54, 61, [["Block", " a "]]], ["// b &#47;* c", 61, 74]], [["x", 43, 44]]],
     ],
     [
       "const x = <p>a &amp; /* c */ b &#47;/ d</p>;",
       "App.jsx",
-      [[["a &amp; ", 13, 21], ["{}", 21, 28], [" b &#47;/ d", 28, 39]]],
+      [[["a &amp; ", 13, 21], ["{}", 21, 28, [["Block", " c "]]], [" b &#47;/ d", 28, 39]]],
     ],
     [
       "const x = <p>\n  a /* c */ b\n  // d\n</p>;",
       "App.tsx",
-      [[["\n  a ", 13, 18], ["{}", 18, 25], [" b\n  ", 25, 30], ["{}", 30, 34], ["\n", 34, 35]]],
+      [[["\n  a ", 13, 18], ["{}", 18, 25, [["Block", " c "]]], [" b\n  ", 25, 30], ["{}", 30, 34, [["Line", " d"]]], ["\n", 34, 35]]],
     ],
   ];
   for (const [source, filename, expected] of cases) {
     assert.deepEqual(children(parseModule(source, filename)), expected, source);
   }
+  // The comment itself, as core writes it.
+  const [empty] = findAll(parseModule("const x = <p>a /* c */ b</p>;", "App.tsrx"), (node) => node.type === "JSXEmptyExpression");
+  assert.deepEqual(empty.innerComments, [
+    { type: "Block", value: " c ", start: 15, end: 22, loc: { start: { line: 1, column: 15 }, end: { line: 1, column: 22 } } },
+  ]);
 });
 
 test("#110: a comment in JSX text is a comment to the parser, in source order", () => {

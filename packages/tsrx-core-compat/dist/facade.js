@@ -983,6 +983,19 @@ function materializeCompatibilityProgram(program, source, filename, loose, posit
 			templateElements.push(value);
 			if (ordinaryJsx) splitTextComments(value);
 		}
+		const comment = value.type === "JSXEmptyExpression" && source.slice(value.start, value.end);
+		if (comment && /^(\/\/[^\r\n]*|\/\*(?:(?!\*\/)[\s\S])*\*\/)$/u.test(comment)) {
+			const type = comment[1] === "/" ? "Line" : "Block";
+			const text = comment.slice(2, type === "Line" ? void 0 : -2);
+			const { start, end, loc } = value;
+			value.innerComments = [{
+				type,
+				value: text,
+				start,
+				end,
+				loc
+			}];
+		}
 		if (value.type === "TSModuleDeclaration") {
 			value.metadata ??= { path: [] };
 			value.metadata.path ??= [];
