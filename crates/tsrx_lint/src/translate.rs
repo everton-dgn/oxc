@@ -1,7 +1,7 @@
 //! Moving diagnostics out of projected coordinates back onto the author's source, and dropping
 //! the ones that landed in generated scaffolding the author never wrote.
 
-use oxc_adapter::EngineDiagnostic;
+use oxc_adapter::{DYNAMIC_TAG_EXPRESSION_CODE, EngineDiagnostic};
 use tsrx_syntax::{MappedProjection, TypeProjection, project_for_lint, scan_for_parser};
 
 /// One diagnostic label range, in bytes.
@@ -123,6 +123,36 @@ fn map_projection_labels(
     Some(mapped)
 }
 
+/// Map each label by its two ends alone, for a report whose ends are authored tokens.
+///
+/// An invalid dynamic tag part starts and ends on authored tokens, but may span a nested element
+/// the projection rewrote, so it need not lie in one segment. Each end still maps on its own, the
+/// way the parser lane maps the same report.
+fn map_authored_endpoints(
+    projection: &MappedProjection,
+    labels: &[PluginLabel],
+) -> Option<Vec<PluginLabel>> {
+    let segments = projection.view().segments;
+    let map = |point: u32, start: bool| {
+        segments.iter().find_map(|segment| {
+            let contains = if start {
+                segment.projected.start <= point && point < segment.projected.end
+            } else {
+                segment.projected.start < point && point <= segment.projected.end
+            };
+            contains.then(|| segment.original_start + (point - segment.projected.start))
+        })
+    };
+    labels
+        .iter()
+        .map(|label| {
+            let start = map(label.offset, true)?;
+            let end = map(label.offset.saturating_add(label.length), false)?;
+            (start < end).then_some(PluginLabel { offset: start, length: end - start })
+        })
+        .collect()
+}
+
 #[derive(Default)]
 pub(crate) struct TranslatedDiagnostics {
     pub(crate) diagnostics: Vec<EngineDiagnostic>,
@@ -144,7 +174,12 @@ pub(crate) fn translate_diagnostics(
             .iter()
             .map(|label| PluginLabel { offset: label.offset, length: label.length })
             .collect::<Vec<_>>();
-        let Some(mapped) = map_projection_labels(projection, &ranges) else {
+        let mapped = map_projection_labels(projection, &ranges).or_else(|| {
+            (diagnostic.code == DYNAMIC_TAG_EXPRESSION_CODE)
+                .then(|| map_authored_endpoints(projection, &ranges))
+                .flatten()
+        });
+        let Some(mapped) = mapped else {
             translated.suppressed += 1;
             translated.rejected_fixes += u32::try_from(diagnostic.fixes.len()).unwrap_or(u32::MAX);
             continue;

@@ -90,7 +90,6 @@ test('rejects malformed control families without returning partial output', asyn
 test('rejects malformed dynamic tags and styles without returning partial output', async () => {
   for (const [source, expected] of [
     ['function View() @{ <{tag}>Hi</{other}> }', /closing|dynamic|match/i],
-    ['function View() @{ <{tag()} /> }', /dynamic|tag/i],
     ['function View() @{ <style>.card { color: red; } }', /style|closing/i],
   ]) {
     const result = await run(['--stdin-filepath=invalid.tsrx'], source);
@@ -98,6 +97,14 @@ test('rejects malformed dynamic tags and styles without returning partial output
     assert.equal(result.stdout, '');
     assert.match(result.stderr, expected);
   }
+});
+
+test('formats a dynamic tag expression @tsrx/core only reports', async () => {
+  // Core reports `<{tag()}>` as tsrx-dynamic-tag-expression without failing the parse, and its
+  // formatters still format the file; lint is where the report shows.
+  const result = await run(['--stdin-filepath=reported.tsrx'], 'function View() @{ <{tag()} /> }');
+  assert.equal(result.code, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /<\{tag\(\)\} \/>/);
 });
 
 test('preserves raw style payloads without claiming CSS validation', async () => {

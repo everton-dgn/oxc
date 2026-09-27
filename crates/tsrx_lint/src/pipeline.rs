@@ -8,11 +8,12 @@ use std::{
 };
 
 use oxc_adapter::{
-    DynamicTagContract, EngineDiagnostic, LintError as EngineLintError, LintRequest, LintResult,
-    OXC_REVISION, SourceKind, TypeBatchFile,
+    DynamicTagContract, EngineDiagnostic, EngineSpan, LintError as EngineLintError, LintRequest,
+    LintResult, OXC_REVISION, SourceKind, TypeBatchFile,
 };
 use tsrx_syntax::{
-    MappedProjection, TypeProjection, project_for_lint, project_for_types, scan_for_parser,
+    MappedProjection, SCRIPT_END_TAG_IN_BODY_CODE, TypeProjection, project_for_lint,
+    project_for_types, scan_for_parser, script_end_tags_in_body,
 };
 
 use crate::{
@@ -31,6 +32,9 @@ pub(crate) struct PreparedSource {
     pub(crate) type_projection: Option<TypeProjection>,
     pub(crate) source_kind: SourceKind,
     pub(crate) is_tsrx: bool,
+    /// `@tsrx/core`'s recoverable reports that only the authored source can show, already in
+    /// authored bytes: a `</script` a `<script>` body keeps as text.
+    authored_diagnostics: Vec<EngineDiagnostic>,
     timings: TimingOutput,
 }
 
@@ -197,6 +201,7 @@ pub(crate) fn finish_lint(
     prepared.timings.lint_ns = syntax.timings.lint_ns;
     prepared.timings.type_aware_ns = type_aware_ns;
     let mut translated = translate_diagnostics(syntax.diagnostics, prepared.projection.as_ref());
+    translated.diagnostics.splice(0..0, std::mem::take(&mut prepared.authored_diagnostics));
     let mut type_translated =
         translate_type_diagnostics(type_diagnostics, prepared.type_projection.as_ref());
     translated.diagnostics.append(&mut type_translated.diagnostics);
@@ -266,6 +271,7 @@ fn prepare_source(
             type_projection: None,
             source_kind: SourceKind::from_path(path)?,
             is_tsrx,
+            authored_diagnostics: Vec::new(),
             timings,
         });
     }
@@ -276,11 +282,28 @@ fn prepare_source(
     let projection = project_for_lint(source, &overlay)?;
     let type_projection = type_aware.then(|| project_for_types(source, &overlay)).transpose()?;
     timings.projection_ns = elapsed_ns(started);
+    let authored_diagnostics = script_end_tags_in_body(source, overlay.view())
+        .into_iter()
+        .map(|report| EngineDiagnostic {
+            rule: Some(SCRIPT_END_TAG_IN_BODY_CODE.to_string()),
+            plugin: None,
+            code: SCRIPT_END_TAG_IN_BODY_CODE.to_string(),
+            severity: "error".to_string(),
+            message: report.message(source),
+            labels: vec![EngineSpan {
+                offset: report.span.start,
+                length: report.span.end - report.span.start,
+                message: None,
+            }],
+            fixes: Vec::new(),
+        })
+        .collect();
     Ok(PreparedSource {
         projection: Some(projection),
         type_projection,
         source_kind: SourceKind::TypeScriptReact,
         is_tsrx,
+        authored_diagnostics,
         timings,
     })
 }

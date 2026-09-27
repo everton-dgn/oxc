@@ -101,8 +101,9 @@ As in `@tsrx/core` 0.5, a tag expression is one of three forms: an identifier
 `items[0]`), or a string literal (`'section'`). Anything else, such as
 `c ? A : B`, `tag as any`, `props?.as`, or a call, still parses, but it is
 reported with the code `tsrx-dynamic-tag-expression`. A normal parse throws
-that error, and `collect` and `loose` mode record it and keep the tree, so
-lint and format still work on the file. To fix it, compute the tag above the
+that error, and `collect` and `loose` mode record it and keep the tree.
+`oxc-tsrx lint` and the editor report it as an error on the expression, and
+still lint and format the rest of the file. To fix it, compute the tag above the
 element (`const Tag = c ? A : B;`) and write `<{Tag} />`.
 
 Identities are structurally normalized (enclosing parentheses and trivia are

@@ -1076,14 +1076,25 @@ mod tests {
     }
 
     #[test]
-    fn a_dynamic_tag_expression_core_only_reports_does_not_block_linting() {
-        // `@tsrx/core` reports a call in a dynamic tag without failing the parse, and its
-        // formatters still format the file, so the lint lane must not refuse it either.
+    fn a_dynamic_tag_expression_core_only_reports_is_an_error_not_a_lint_failure() {
+        // `@tsrx/core` reports a call in a dynamic tag without failing the parse, its formatters
+        // still format the file, and its editor tooling underlines the call. The lint lane must
+        // not refuse the file, and must hand the editor that report at the call.
         let source = "export function View() @{ <{tag()}>hi</{tag()}> }";
-        LintSession::new_with_config_source(Path::new("/demo"), Some("{}"), &[], false)
-            .expect("an in-memory config compiles without reading the filesystem")
-            .lint_text(Path::new("View.tsrx"), source)
-            .expect("a reported dynamic tag expression still lints");
+        let output =
+            LintSession::new_with_config_source(Path::new("/demo"), Some("{}"), &[], false)
+                .expect("an in-memory config compiles without reading the filesystem")
+                .lint_text(Path::new("View.tsrx"), source)
+                .expect("a reported dynamic tag expression still lints");
+        let [diagnostic] = &output.diagnostics[..] else {
+            panic!("one report: {:?}", output.diagnostics);
+        };
+        assert_eq!(diagnostic.rule, "tsrx-dynamic-tag-expression");
+        assert_eq!(diagnostic.code, "tsrx-dynamic-tag-expression");
+        assert_eq!(diagnostic.severity, "error");
+        let start = source.find("tag()").expect("the fixture holds the call");
+        assert_eq!(diagnostic.labels[0].span.offset as usize, start);
+        assert_eq!(diagnostic.labels[0].span.length as usize, "tag()".len());
     }
 
     #[test]

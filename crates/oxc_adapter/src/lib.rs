@@ -14,13 +14,15 @@ pub mod editor;
 mod dynamic_tags;
 
 #[cfg(any(feature = "parser", feature = "toolchain"))]
-pub use dynamic_tags::{DYNAMIC_TAG_EXPRESSION_MESSAGE, DynamicTagError, InvalidDynamicTag};
+pub use dynamic_tags::{
+    DYNAMIC_TAG_EXPRESSION_CODE, DYNAMIC_TAG_EXPRESSION_MESSAGE, DynamicTagError, InvalidDynamicTag,
+};
 
 #[cfg(feature = "parser")]
 pub(crate) use dynamic_tags::validate_dynamic_tags_with_synthetic_calls;
 
 #[cfg(feature = "toolchain")]
-pub(crate) use dynamic_tags::validate_dynamic_tags;
+pub(crate) use dynamic_tags::find_invalid_dynamic_tags;
 
 #[cfg(feature = "toolchain")]
 mod toolchain;

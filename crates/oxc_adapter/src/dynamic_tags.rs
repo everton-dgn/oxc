@@ -9,6 +9,9 @@ use crate::DynamicTagContract;
 /// `@tsrx/core`'s message for a dynamic tag expression that isn't one of the allowed forms.
 pub const DYNAMIC_TAG_EXPRESSION_MESSAGE: &str = "A dynamic tag expression must be an identifier, a member access such as `props.as` or `registry[name]`, or a string literal. Compute anything else before the element: `const Tag = c ? Child : Fallback;`, then `<{Tag} />`.";
 
+/// `@tsrx/core`'s diagnostic code for a dynamic tag expression that isn't one of the allowed forms.
+pub const DYNAMIC_TAG_EXPRESSION_CODE: &str = "tsrx-dynamic-tag-expression";
+
 /// The part of one dynamic tag expression that isn't an allowed form, in projected-source bytes.
 ///
 /// This is a recoverable report, not a parse failure: the parse keeps its Program, a strict
@@ -23,18 +26,20 @@ pub struct InvalidDynamicTag {
     pub end: u32,
 }
 
-/// Validates the dynamic-tag scaffolds of a toolchain (format or lint) projection.
+/// Validates the dynamic-tag scaffolds of a toolchain (format or lint) projection and returns the
+/// authored expressions `@tsrx/core` reports, in toolchain-projection bytes.
 ///
 /// The toolchain lanes format and lint a file whose dynamic tag expressions the parser only
-/// reports, as `@tsrx/core` formatters do, so only the scaffold contract can fail here. Their
-/// projection doesn't wrap the expression in the parser projection's parentheses either, so the
-/// parser's report positions don't apply to it.
+/// reports, as `@tsrx/core` formatters do, so only the scaffold contract can fail here. The lint
+/// lane surfaces the reports as error diagnostics, as core's editor tooling does. The toolchain
+/// projection writes the expression as `{expression}`, without the parser projection's generated
+/// parentheses, so every parenthesis inside the container is authored.
 #[cfg(feature = "toolchain")]
-pub(crate) fn validate_dynamic_tags(
+pub(crate) fn find_invalid_dynamic_tags(
     program: &oxc_ast::ast::Program<'_>,
     contract: Option<DynamicTagContract<'_>>,
-) -> Result<(), DynamicTagError> {
-    validate_dynamic_tags_with_synthetic_calls(program, contract, &[]).map(|_| ())
+) -> Result<Vec<InvalidDynamicTag>, DynamicTagError> {
+    validate(program, contract, &[], false)
 }
 
 /// Why a TSRX dynamic-tag scaffold did not validate against the parsed OXC AST.
@@ -109,10 +114,22 @@ impl fmt::Display for DynamicTagError {
 
 impl Error for DynamicTagError {}
 
+/// Validates the dynamic-tag scaffolds of a parser projection, which wraps each expression in
+/// generated parentheses, and returns the reports in parser-projection bytes.
+#[cfg(feature = "parser")]
 pub(crate) fn validate_dynamic_tags_with_synthetic_calls(
     program: &oxc_ast::ast::Program<'_>,
     contract: Option<DynamicTagContract<'_>>,
     synthetic_callee_spans: &[(u32, u32)],
+) -> Result<Vec<InvalidDynamicTag>, DynamicTagError> {
+    validate(program, contract, synthetic_callee_spans, true)
+}
+
+fn validate(
+    program: &oxc_ast::ast::Program<'_>,
+    contract: Option<DynamicTagContract<'_>>,
+    synthetic_callee_spans: &[(u32, u32)],
+    wrapped: bool,
 ) -> Result<Vec<InvalidDynamicTag>, DynamicTagError> {
     if synthetic_callee_spans.windows(2).any(|pair| pair[0] >= pair[1]) {
         return Err(DynamicTagError::UnorderedSyntheticCallees);
@@ -128,6 +145,7 @@ pub(crate) fn validate_dynamic_tags_with_synthetic_calls(
     let mut validator = DynamicTagValidator {
         prefix: contract.prefix,
         source: program.source_text,
+        wrapped,
         seen: vec![false; count],
         invalid: Vec::new(),
         error: None,
@@ -145,6 +163,8 @@ pub(crate) fn validate_dynamic_tags_with_synthetic_calls(
 struct DynamicTagValidator<'c> {
     prefix: &'c str,
     source: &'c str,
+    /// Whether the projection wrapped each expression in generated parentheses.
+    wrapped: bool,
     seen: Vec<bool>,
     invalid: Vec<InvalidDynamicTag>,
     error: Option<DynamicTagError>,
@@ -182,9 +202,10 @@ impl<'a> Visit<'a> for DynamicTagValidator<'_> {
         };
         // The parser projection writes the authored expression as `{(expression)}`. Those two
         // parentheses are generated, so only parentheses strictly inside them are authored. The
-        // toolchain projection writes `{expression}` and discards these reports.
+        // toolchain projection writes `{expression}`, so its parentheses are all authored.
         let bytes = self.source.as_bytes();
-        let generated = bytes.get(container.start as usize + 1) == Some(&b'(')
+        let generated = self.wrapped
+            && bytes.get(container.start as usize + 1) == Some(&b'(')
             && container.end >= 2
             && bytes.get(container.end as usize - 2) == Some(&b')');
         let inset = if generated { 2 } else { 1 };

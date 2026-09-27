@@ -3,6 +3,8 @@
 use oxc_diagnostics::OxcDiagnostic;
 use oxc_linter::{FixKind, Message, PossibleFixes};
 
+use crate::{DYNAMIC_TAG_EXPRESSION_CODE, DYNAMIC_TAG_EXPRESSION_MESSAGE, InvalidDynamicTag};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EngineSpan {
     pub offset: u32,
@@ -73,6 +75,25 @@ pub(super) fn map_oxc_diagnostic(error: &OxcDiagnostic) -> EngineDiagnostic {
                 message: label.label().map(ToString::to_string),
             })
             .collect(),
+        fixes: Vec::new(),
+    }
+}
+
+/// A dynamic tag expression `@tsrx/core` reports, as the error its editor tooling shows: core's
+/// code doubles as the rule name so an editor can name it, and its label addresses the linted
+/// projection like every other diagnostic here. It has no fix, since core offers none.
+pub(super) fn invalid_dynamic_tag_diagnostic(tag: &InvalidDynamicTag) -> EngineDiagnostic {
+    EngineDiagnostic {
+        rule: Some(DYNAMIC_TAG_EXPRESSION_CODE.to_string()),
+        plugin: None,
+        code: DYNAMIC_TAG_EXPRESSION_CODE.to_string(),
+        severity: "error".to_string(),
+        message: DYNAMIC_TAG_EXPRESSION_MESSAGE.to_string(),
+        labels: vec![EngineSpan {
+            offset: tag.start,
+            length: tag.end.saturating_sub(tag.start),
+            message: None,
+        }],
         fixes: Vec::new(),
     }
 }

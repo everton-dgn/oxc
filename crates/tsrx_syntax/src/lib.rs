@@ -8,6 +8,7 @@ mod parser_scanner;
 mod projection;
 mod projection_view;
 mod scanner;
+mod script_end_tags;
 
 pub use diagnostics::ProjectionError;
 pub use model::{
@@ -25,6 +26,9 @@ pub use projection::{
     project_for_format, project_for_lint, project_for_types,
 };
 pub use projection_view::{ProjectionSegment, ProjectionView};
+pub use script_end_tags::{
+    SCRIPT_END_TAG_IN_BODY_CODE, ScriptEndTagInBody, script_end_tags_in_body,
+};
 
 use scanner::Scanner;
 
