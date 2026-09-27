@@ -98,10 +98,16 @@ function parserOptions(filename, eagerTsrx = false) {
   return eagerTsrx ? EAGER_PARSER_OPTIONS : PARSER_OPTIONS;
 }
 
-const DYNAMIC_TAG_CANDIDATE_MESSAGE =
-  /^TSRX dynamic tag \d+ at source byte \d+ must be an identifier, member, static string, or runtime expression without calls, construction, spreads, concatenation, interpolation, objects, or arrays$/u;
+// `@tsrx/core` 0.5 accepts three dynamic tag forms: an identifier, a member access chain, and a
+// string literal. The native parser reports any other expression with core's message, once per
+// element at the part that isn't allowed, and keeps the Program: a strict parse throws it and
+// `collect`/`loose` record it. A tag that is no expression at all (`<{...a} />`, `<{} />`) fails
+// the parse in every mode, as core's acorn raise does, with the same message and a `(line:column)`.
 const DYNAMIC_TAG_REFERENCE_MESSAGE =
-  "Dynamic element names must be an identifier, member expression, static string, or runtime expression; calls, spreads, string concatenation, string interpolation, and static null, undefined, boolean, number, object, and array literals are not valid tag names.";
+  "A dynamic tag expression must be an identifier, a member access such as `props.as` or `registry[name]`, or a string literal. Compute anything else before the element: `const Tag = c ? Child : Fallback;`, then `<{Tag} />`.";
+const DYNAMIC_TAG_EXPRESSION_CODE = "tsrx-dynamic-tag-expression";
+const DYNAMIC_TAG_NOT_EXPRESSION_MESSAGE =
+  /^malformed TSRX at byte \d+: expected a valid dynamic JSX tag expression$/u;
 const IDENTIFIER_START = /[$_\p{ID_Start}]/u;
 const IDENTIFIER_CONTINUE = /[$_\u200c\u200d\p{ID_Continue}]/u;
 const WHITESPACE = /\s/u;
@@ -270,15 +276,36 @@ function compatibleDiagnosticSpan(error, source) {
 
 function compatibleDiagnosticMessage(error) {
   const message = typeof error?.message === "string" ? error.message : String(error);
-  return DYNAMIC_TAG_CANDIDATE_MESSAGE.test(message)
-    ? DYNAMIC_TAG_REFERENCE_MESSAGE
-    : message;
+  return message;
+}
+
+function isDynamicTagNotExpression(error) {
+  return typeof error?.message === "string" && DYNAMIC_TAG_NOT_EXPRESSION_MESSAGE.test(error.message);
+}
+
+// Core raises `<{...a} />` and `<{} />` through acorn: `pos`, a `{ line, column }` `loc`, and
+// `raisedAt`, with the position appended to the message and no `end`, `code`, or `type`.
+function dynamicTagNotExpressionError(error, positionAt) {
+  const { start, end } = primarySpan(error);
+  const loc = positionAt(start);
+  const raised = new SyntaxError(
+    `${DYNAMIC_TAG_REFERENCE_MESSAGE} (${loc.line}:${loc.column})`,
+  ) as SyntaxError & { pos?: number; loc?: unknown; raisedAt?: number };
+  raised.pos = start;
+  raised.loc = loc;
+  raised.raisedAt = end;
+  return raised;
+}
+
+function compatibleDiagnosticCode(error, message) {
+  if (typeof error?.code === "string") return error.code;
+  return message === DYNAMIC_TAG_REFERENCE_MESSAGE ? DYNAMIC_TAG_EXPRESSION_CODE : undefined;
 }
 
 function toCompileError(error, filename, positionAt, type, source) {
   const translated = new SyntaxError(compatibleDiagnosticMessage(error)) as CompatSyntaxError;
   const { start, end } = compatibleDiagnosticSpan(error, source);
-  translated.code = typeof error?.code === "string" ? error.code : undefined;
+  translated.code = compatibleDiagnosticCode(error, translated.message);
   translated.pos = start;
   translated.raisedAt = end;
   translated.end = end;
@@ -1001,7 +1028,65 @@ function isClosedTemplateElement(value) {
   );
 }
 
-function normalizeTemplateTextChildren(value, positionAt, trimInitialLayout) {
+// `@tsrx/core` 0.5 reads JavaScript comments in JSX text as comments, not text: `/* ... */`
+// anywhere, and `//` up to the line break when only spaces and tabs precede it on its line or
+// since the text began (so `a // note` and `https://...` stay text). The whitespace around a
+// comment stays. Returns null when the text has no comment.
+function stripTextComments(text) {
+  if (!text.includes("/")) return null;
+  let output = "";
+  let changed = false;
+  let segmentStart = 0;
+  let index = 0;
+  let lineBlank = true;
+  while (index < text.length) {
+    const code = text.charCodeAt(index);
+    if (code === 47 && text.charCodeAt(index + 1) === 47 && lineBlank) {
+      output += text.slice(segmentStart, index);
+      index += 2;
+      while (index < text.length && text[index] !== "\n" && text[index] !== "\r") index += 1;
+      segmentStart = index;
+      changed = true;
+      continue;
+    }
+    if (code === 47 && text.charCodeAt(index + 1) === 42) {
+      output += text.slice(segmentStart, index);
+      const close = text.indexOf("*/", index + 2);
+      index = close === -1 ? text.length : close + 2;
+      segmentStart = index;
+      changed = true;
+      lineBlank = false;
+      continue;
+    }
+    if (code === 10 || code === 13) lineBlank = true;
+    else if (code !== 32 && code !== 9) lineBlank = false;
+    index += 1;
+  }
+  return changed ? output + text.slice(segmentStart) : null;
+}
+
+// The native parser leaves template text comments out already, so this reads only text that is
+// still exactly as written: plain-function JSX, and elements nested in expression containers.
+function stripAuthoredTextComments(child, source) {
+  if (
+    typeof source !== "string" ||
+    typeof child.raw !== "string" ||
+    !Number.isInteger(child.start) ||
+    !Number.isInteger(child.end) ||
+    source.slice(child.start, child.end) !== child.raw
+  ) {
+    return;
+  }
+  const stripped = stripTextComments(child.raw);
+  if (stripped === null) return;
+  child.value = stripped;
+  child.raw = stripped;
+}
+
+// JSX whitespace is space, tab, CR and LF only; a non-breaking space is text.
+const JSX_LAYOUT_WHITESPACE = /^[ \t\r\n]*$/u;
+
+function normalizeTemplateTextChildren(value, positionAt, trimInitialLayout, source) {
   if (
     (value.type !== "JSXElement" && value.type !== "JSXFragment") ||
     !Array.isArray(value.children)
@@ -1013,7 +1098,9 @@ function normalizeTemplateTextChildren(value, positionAt, trimInitialLayout) {
   for (let read = 0; read < value.children.length; read += 1) {
     const child = value.children[read];
     if (child?.type === "JSXText" && typeof child.value === "string") {
-      if (child.value.trim() === "" && /[\r\n]/u.test(child.value)) continue;
+      stripAuthoredTextComments(child, source);
+      if (child.value === "") continue;
+      if (JSX_LAYOUT_WHITESPACE.test(child.value) && /[\r\n]/u.test(child.value)) continue;
 
       const previous = write === 0 ? null : value.children[write - 1];
       if ((write === 0 && trimInitialLayout) || isClosedTemplateElement(previous)) {
@@ -1208,7 +1295,7 @@ function materializeCompatibilityProgram(program, source, filename, loose, posit
           ? "script"
           : "template";
       templateElements.push(value);
-      normalizeTemplateTextChildren(value, positionAt, insideScriptSetup);
+      normalizeTemplateTextChildren(value, positionAt, insideScriptSetup, source);
     }
 
     if (value.type === "TSModuleDeclaration") {
@@ -1444,6 +1531,98 @@ function undefinedLocalExportDiagnostics(program) {
   return diagnostics;
 }
 
+// `@tsrx/core` 0.5 ends a `<script>` body where HTML ends it: at the first `</script` followed by
+// optional HTML whitespace and `>`. The native parser stops the body there too; any other
+// `</script` in any letter case (`</SCRIPT>`, `</scripts>`, `</script/>`) is left in `content`,
+// and core reports each one, 8 characters wide, as a recoverable error.
+const SCRIPT_END_TAG_START = /<\/script/giu;
+const SCRIPT_END_TAG_IN_BODY_CODE = "tsrx-script-end-tag-in-body";
+
+function mayHaveScriptEndTagInBody(source) {
+  if (typeof source !== "string") return false;
+  SCRIPT_END_TAG_START.lastIndex = 0;
+  let match;
+  while ((match = SCRIPT_END_TAG_START.exec(source)) !== null) {
+    if (match[0] !== "</script") return true;
+    if (!/^[\t\n\f\r ]*>/u.test(source.slice(match.index + match[0].length))) return true;
+  }
+  return false;
+}
+
+function scriptEndTagDiagnostics(program, source) {
+  if (!mayHaveScriptEndTagInBody(source)) return [];
+  const diagnostics = [];
+  const stack = [program];
+  while (stack.length > 0) {
+    const value = stack.pop();
+    if (value === null || typeof value !== "object") continue;
+    if (Array.isArray(value)) {
+      for (let index = value.length - 1; index >= 0; index -= 1) stack.push(value[index]);
+      continue;
+    }
+    if (
+      value.type === "JSXElement" &&
+      value.openingElement?.name?.type === "JSXIdentifier" &&
+      value.openingElement.name.name === "script" &&
+      typeof value.content === "string" &&
+      Number.isInteger(value.openingElement.end)
+    ) {
+      const contentStart = value.openingElement.end;
+      SCRIPT_END_TAG_START.lastIndex = 0;
+      let match;
+      while ((match = SCRIPT_END_TAG_START.exec(value.content)) !== null) {
+        const written = match[0];
+        const start = contentStart + match.index;
+        diagnostics.push({
+          severity: "Error",
+          message: `'${written}' can end a script in HTML, so a '<script>' body can't contain it. Write '<\\/${written.slice(2)}' instead.`,
+          code: SCRIPT_END_TAG_IN_BODY_CODE,
+          labels: [{ start, end: start + written.length, message: "" }],
+          helpMessage: null,
+          codeframe: null,
+        });
+      }
+    }
+    for (const key in value) {
+      if (key === "loc" || key === "metadata" || key === "content") continue;
+      const child = value[key];
+      if (child !== null && typeof child === "object") stack.push(child);
+    }
+  }
+  return diagnostics;
+}
+
+// Core reports in parse order: source order, except that a dynamic tag nested in another tag's
+// name reports before its parent. The native parser hands dynamic tag reports over in that order,
+// so they stay as they are, and every other diagnostic is merged in by its start.
+function sortBySourceOrder(errors) {
+  const dynamic = [];
+  const others = [];
+  for (const [index, error] of errors.entries()) {
+    (error?.message === DYNAMIC_TAG_REFERENCE_MESSAGE ? dynamic : others).push({ error, index });
+  }
+  others.sort(
+    (left, right) =>
+      diagnosticStart(left.error) - diagnosticStart(right.error) || left.index - right.index,
+  );
+  const merged = [];
+  let next = 0;
+  for (const entry of dynamic) {
+    while (next < others.length && diagnosticStart(others[next].error) < diagnosticStart(entry.error)) {
+      merged.push(others[next].error);
+      next += 1;
+    }
+    merged.push(entry.error);
+  }
+  for (; next < others.length; next += 1) merged.push(others[next].error);
+  return merged;
+}
+
+function diagnosticStart(error) {
+  const { start } = primarySpan(error);
+  return Number.isInteger(start) ? start : Number.POSITIVE_INFINITY;
+}
+
 export function isEventAttribute(name) {
   return name.startsWith("on") && name.length > 2 && name[2] === name[2].toUpperCase();
 }
@@ -1515,6 +1694,9 @@ export function createTsrxCoreCompat(parser) {
           result = recovered;
         } else {
           if (isOperationalError(error) || !isSyntaxErrorLike(error)) throw error;
+          if (isDynamicTagNotExpression(error)) {
+            throw dynamicTagNotExpressionError(error, positions());
+          }
           const translated = toCompileError(error, resolvedFilename, positions(), "fatal", source);
           if (collecting && Array.isArray(options?.errors)) {
             options.errors.push(
@@ -1540,6 +1722,11 @@ export function createTsrxCoreCompat(parser) {
         } catch {
           // Preserve the ordinary result unless TSRX produces a complete successful Program.
         }
+      }
+
+      if (parserResultProgram(result) === null) {
+        const notExpression = parserResultErrors(result).find(isDynamicTagNotExpression);
+        if (notExpression !== undefined) throw dynamicTagNotExpressionError(notExpression, positions());
       }
 
       let program;
@@ -1582,9 +1769,25 @@ export function createTsrxCoreCompat(parser) {
             nativeErrors = [...nativeErrors, ...compatibilityErrors];
           }
         }
+        if (
+          nativeErrors.length > 1 &&
+          nativeErrors.some((error) => error?.message === DYNAMIC_TAG_REFERENCE_MESSAGE)
+        ) {
+          // The native parser appends dynamic tag reports after its other diagnostics; core
+          // reports in parse order, so a strict parse throws the one core throws.
+          nativeErrors = sortBySourceOrder(nativeErrors);
+        }
+        if (program !== null) {
+          const scriptErrors = scriptEndTagDiagnostics(program, source);
+          if (scriptErrors.length > 0) {
+            // Core reports in source order, so a strict parse throws the earliest error.
+            nativeErrors = sortBySourceOrder([...nativeErrors, ...scriptErrors]);
+          }
+        }
         comments = wantsComments ? (result?.comments ?? []) : [];
       } catch (error) {
         if (isOperationalError(error) || !isSyntaxErrorLike(error)) throw error;
+        if (isDynamicTagNotExpression(error)) throw dynamicTagNotExpressionError(error, positions());
         const translated = toCompileError(error, resolvedFilename, positions(), "fatal", source);
         if (collecting && Array.isArray(options?.errors)) {
           options.errors.push(

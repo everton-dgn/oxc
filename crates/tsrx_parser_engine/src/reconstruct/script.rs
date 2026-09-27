@@ -1,4 +1,5 @@
-//! Raw-text `<script>` payloads, hidden from OXC and restored as one authored JSX text child.
+//! Raw-text `<script>` payloads, hidden from OXC and restored as the element's `content`, with no
+//! children, as `@tsrx/core` reads them.
 
 use tsrx_syntax::{ByteSpan, OverlayView, ProjectionSegment};
 use tsrx_tape_schema::{FlatTape, RecordIndex, ValueRef};
@@ -26,6 +27,7 @@ pub(super) fn reconstruct_script_elements(
     parents: &ParentIndex,
     starts: &mut Vec<AuthoredStart>,
 ) -> Result<(), TsrxParseError> {
+    let mut removals = Vec::with_capacity(overlay.script_blocks.len());
     for script in overlay.script_blocks {
         let (element, opening) =
             find_projected_script(tape, *script, segments, opening_elements, parents)?;
@@ -49,7 +51,16 @@ pub(super) fn reconstruct_script_elements(
             .as_object()
             .ok_or(TsrxParseError::Unsupported("raw script scaffold is not an object"))?;
         validate_payload_scaffold(tape, helper, *script, segments)?;
+        // The scaffold is rebuilt as authored text so every record keeps an authored span, then
+        // unlinked: like `@tsrx/core` (tsrx-org/tsrx#790), the body lives only on `content` and
+        // the element has no children.
         rebuild_script_text(tape, authored, helper, script.content, starts)?;
+        let entry = tape
+            .values_indexed(children)
+            .next()
+            .map(|(entry, _)| entry)
+            .ok_or(TsrxParseError::Unsupported("raw script scaffold has no list entry"))?;
+        removals.push((children, entry));
 
         if tape.field_index(element, "content").is_some() {
             return Err(TsrxParseError::Unsupported(
@@ -59,6 +70,7 @@ pub(super) fn reconstruct_script_elements(
         let content = tape.push_json_string_scalar(slice_authored(authored, script.content)?)?;
         tape.append_field(element, "content", content)?;
     }
+    tape.remove_list_values(&removals)?;
     Ok(())
 }
 

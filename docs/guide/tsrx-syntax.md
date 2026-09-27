@@ -91,10 +91,19 @@ real expression AST from the single official OXC parse, with no lexical
 approximation and no second parser:
 
 ```tsrx
-<{condition ? Primary : Fallback} prop={value}>
+<{props.as} prop={value}>
   children
-</{condition ? Primary : Fallback}>
+</{props.as}>
 ```
+
+As in `@tsrx/core` 0.5, a tag expression is one of three forms: an identifier
+(`Tag`), a member access (`props.as`, `this.tag`, `registry[name]`,
+`items[0]`), or a string literal (`'section'`). Anything else, such as
+`c ? A : B`, `tag as any`, `props?.as`, or a call, still parses, but it is
+reported with the code `tsrx-dynamic-tag-expression`. A normal parse throws
+that error, and `collect` and `loose` mode record it and keep the tree, so
+lint and format still work on the file. To fix it, compute the tag above the
+element (`const Tag = c ? A : B;`) and write `<{Tag} />`.
 
 Identities are structurally normalized (enclosing parentheses and trivia are
 stripped; edge comments are retained), so equivalent opening and closing

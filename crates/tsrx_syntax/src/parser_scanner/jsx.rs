@@ -245,18 +245,17 @@ impl Scanner<'_> {
         }
 
         if script {
-            let Some(relative_close) = find_bytes(&self.bytes[index..], b"</script>") else {
+            let Some((close_start, close_end)) = find_script_body_end(self.bytes, index) else {
                 return Err(ProjectionError::UnterminatedSyntax {
                     offset: to_u32(start)?,
                     construct: "inline `<script>` block",
                 });
             };
-            let close_start = index + relative_close;
             self.mark_surrogates(index, close_start, OpaqueSurrogateContext::JsxText);
             let content = ByteSpan::new(to_u32(index)?, to_u32(close_start)?);
             let owner = to_u32(self.script_blocks.len())?;
             self.script_blocks.push(ScriptBlock {
-                element: ByteSpan::new(to_u32(start)?, to_u32(close_start + "</script>".len())?),
+                element: ByteSpan::new(to_u32(start)?, to_u32(close_end)?),
                 content,
             });
             self.embedded_tokens.push(EmbeddedToken {
@@ -264,7 +263,7 @@ impl Scanner<'_> {
                 span: content,
                 owner,
             });
-            return Ok(close_start + "</script>".len());
+            return Ok(close_end);
         }
 
         loop {
@@ -590,6 +589,33 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         return Some(0);
     }
     haystack.windows(needle.len()).position(|window| window == needle)
+}
+
+/// Finds where a raw `<script>` body ends, as HTML ends it: at the first `</script` written in
+/// lowercase and followed by optional HTML whitespace (tab, LF, FF, CR, space) and `>`. Returns the
+/// closing tag's `[start, end)`, which includes that whitespace. Any other `</script` in the body
+/// (another letter case, `</scripts>`, `</script/>`) stays body text; the compat facade reports
+/// it as `@tsrx/core` does.
+fn find_script_body_end(bytes: &[u8], content_start: usize) -> Option<(usize, usize)> {
+    const OPEN: &[u8] = b"</script";
+    let mut cursor = content_start;
+    while let Some(relative) = find_bytes(bytes.get(cursor..)?, OPEN) {
+        let close_start = cursor + relative;
+        let mut index = close_start + OPEN.len();
+        while bytes.get(index).copied().is_some_and(is_html_whitespace) {
+            index += 1;
+        }
+        if bytes.get(index) == Some(&b'>') {
+            return Some((close_start, index + 1));
+        }
+        cursor = close_start + OPEN.len();
+    }
+    None
+}
+
+/// HTML's whitespace: tab, line feed, form feed, carriage return, and space.
+const fn is_html_whitespace(byte: u8) -> bool {
+    matches!(byte, b'\t' | b'\n' | 0x0c | b'\r' | b' ')
 }
 
 fn jsx_text_looks_structural(bytes: &[u8], index: usize) -> bool {

@@ -165,10 +165,10 @@ fn build_allowed_gaps(
                         .as_bytes()
                         .get(script.element.start as usize..script.element.start as usize + 7)
                         != Some(b"<script")
-                    || source
+                    || !source
                         .as_bytes()
                         .get(script.content.end as usize..script.element.end as usize)
-                        != Some(b"</script>")
+                        .is_some_and(is_script_end_tag)
                 {
                     return Err(TsrxParseError::Unsupported(
                         "script gap differs from its payload token",
@@ -319,4 +319,12 @@ fn consume_allowed_gap(start: u32, end: u32, allowed: &[ByteSpan], index: &mut u
         *index += 1;
     }
     cursor == end
+}
+
+/// A raw script's closing tag as HTML ends the body: `</script`, optional HTML whitespace (tab,
+/// LF, FF, CR, space), then `>`.
+fn is_script_end_tag(bytes: &[u8]) -> bool {
+    bytes.strip_prefix(b"</script").and_then(|rest| rest.strip_suffix(b">")).is_some_and(|gap| {
+        gap.iter().all(|byte| matches!(byte, b'\t' | b'\n' | 0x0c | b'\r' | b' '))
+    })
 }

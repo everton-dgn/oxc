@@ -2,7 +2,7 @@
 //! it, parse it, and reconstruct the authored tree from the result.
 
 use oxc_adapter::{
-    DynamicTagContract,
+    DYNAMIC_TAG_EXPRESSION_MESSAGE, DynamicTagContract, InvalidDynamicTag,
     parser::{
         ProjectedParseRecovery, ProjectedParseRequest, ProjectedParseResult, RejectionMetadata,
         RejectionModuleNames, parse_failed_tsrx_metadata, parse_to_projected_tape,
@@ -21,8 +21,8 @@ use tsrx_tape_schema::{
 use crate::{
     TsrxParseError, TsrxParseOptions, TsrxParseRecovery, TsrxParseResult,
     grammar_result::{
-        adapter_grammar_result, authored_grammar_result, grammar_result,
-        grammar_result_with_rejection_module_names, projection_grammar_result,
+        authored_grammar_result, grammar_result, grammar_result_with_rejection_module_names,
+        projection_grammar_result,
     },
     lexical, projection,
     reconstruct::{
@@ -115,6 +115,46 @@ pub(super) fn push_multiple_output_diagnostics(
     Ok(())
 }
 
+/// Records one recoverable diagnostic per dynamic tag whose expression isn't an allowed form, as
+/// `@tsrx/core` reports it: at the invalid part of the opening tag's expression, with its message.
+///
+/// The part's ends are authored tokens, so each maps back on its own even when the part spans a
+/// nested template the projection rewrote. Should either end sit in generated text, the whole
+/// authored expression stands in for it.
+fn push_invalid_dynamic_tag_diagnostics(
+    errors: &mut DiagnosticTable,
+    invalid: &[InvalidDynamicTag],
+    segments: &[tsrx_syntax::ProjectionSegment],
+    overlay: OverlayView<'_>,
+) -> Result<(), TsrxParseError> {
+    for tag in invalid {
+        let expression =
+            overlay.dynamic_tags.get(tag.index).map(|dynamic| dynamic.expression).ok_or(
+                TsrxParseError::Unsupported("invalid dynamic tag has no authored expression"),
+            )?;
+        let start = projection::map_endpoint(segments, tag.start, true);
+        let end = projection::map_endpoint(segments, tag.end, false);
+        let span = match (start, end) {
+            (Some(start), Some(end)) if start <= end => TapeSpan::new(start, end),
+            _ => TapeSpan::new(expression.start, expression.end),
+        };
+        let labels = errors.append_labels([(span, None, true)])?;
+        errors.push_diagnostic(
+            DiagnosticPhase::Grammar,
+            DiagnosticSeverity::Error,
+            DYNAMIC_TAG_EXPRESSION_MESSAGE,
+            labels,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )?;
+    }
+    Ok(())
+}
+
 fn parse_tsrx_utf8_source_once<W: Utf16WorkObserver>(
     source: &str,
     options: TsrxParseOptions<'_>,
@@ -140,6 +180,7 @@ fn parse_tsrx_utf8_source_once<W: Utf16WorkObserver>(
     if overlay_view.tokens.is_empty()
         && overlay_view.dynamic_tags.is_empty()
         && overlay_view.style_blocks.is_empty()
+        && overlay_view.script_blocks.is_empty()
     {
         return parse_direct(
             source,
@@ -295,7 +336,7 @@ fn parse_projected<W: Utf16WorkObserver>(
         comments: projected_comments,
         errors: projected_errors,
         suppressed_diagnostics: parser_suppressed_diagnostics,
-        authored_grammar,
+        invalid_dynamic_tags,
         syntax_failed,
         panicked: _,
     } = parsed;
@@ -316,19 +357,16 @@ fn parse_projected<W: Utf16WorkObserver>(
         projected.parser_marker_prefix(),
         !syntax_failed,
     )?;
-    if let Some(failure) = authored_grammar {
-        return adapter_grammar_result(
-            source,
-            options.filename,
-            comments,
-            &failure,
-            rejection_module_names,
-        );
-    }
     let (mut errors, projection_suppressed_diagnostics) = reconstruct_diagnostics(
         projected_errors,
         projection_view.segments,
         options.recovery == TsrxParseRecovery::Editor,
+    )?;
+    push_invalid_dynamic_tag_diagnostics(
+        &mut errors,
+        &invalid_dynamic_tags,
+        projection_view.segments,
+        overlay_view,
     )?;
     let suppressed_diagnostics = parser_suppressed_diagnostics
         .checked_add(projection_suppressed_diagnostics)

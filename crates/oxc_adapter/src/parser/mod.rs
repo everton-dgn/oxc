@@ -20,7 +20,7 @@ use tsrx_tape_schema::{
 };
 
 use crate::{
-    DynamicTagContract, DynamicTagError, SourceKind, validate_dynamic_tags_with_synthetic_calls,
+    DynamicTagContract, InvalidDynamicTag, SourceKind, validate_dynamic_tags_with_synthetic_calls,
 };
 pub use ordinary::{
     OrdinaryComment, OrdinaryDiagnostic, OrdinaryDiagnosticLabel, OrdinaryDynamicImport,
@@ -82,15 +82,11 @@ pub struct ProjectedParseResult {
     pub errors: DiagnosticTable,
     /// Parser diagnostics intentionally omitted by the TSRX compatibility route.
     pub suppressed_diagnostics: u32,
-    pub authored_grammar: Option<AuthoredGrammarFailure>,
+    /// Dynamic tag expressions that parse but aren't an allowed form, in projected bytes and
+    /// the order `@tsrx/core` reports them. They never fail the parse: the Program is kept and the caller reports them.
+    pub invalid_dynamic_tags: Vec<InvalidDynamicTag>,
     pub syntax_failed: bool,
     pub panicked: bool,
-}
-
-#[derive(Debug)]
-pub struct AuthoredGrammarFailure {
-    pub message: String,
-    pub offset: u32,
 }
 
 #[derive(Debug)]
@@ -296,45 +292,20 @@ fn parse_to_projected_tape_with_retention(
             comments,
             errors,
             suppressed_diagnostics,
-            authored_grammar: None,
+            invalid_dynamic_tags: Vec::new(),
             syntax_failed: true,
             panicked: parsed.fatal_error,
         });
     }
-    if let Err(error) = validate_dynamic_tags_with_synthetic_calls(
+    // Every dynamic-tag error describes an inconsistent scaffold contract, which is a projector or
+    // adapter defect rather than anything the author wrote. An authored expression that isn't an
+    // allowed tag form is reported with the Program, never as a failure.
+    let invalid_dynamic_tags = validate_dynamic_tags_with_synthetic_calls(
         &parsed.program,
         request.dynamic_tags,
         request.synthetic_callee_spans,
-    ) {
-        return match error {
-            DynamicTagError::AuthoredGrammar { offset, .. } => {
-                let rejection_module_names = match request.rejection_metadata {
-                    RejectionMetadata::None => RejectionModuleNames::default(),
-                    RejectionMetadata::ModuleNames => {
-                        serialize_rejection_module_names(&parsed.module_record, request.source)
-                    }
-                };
-                Ok(ProjectedParseResult {
-                    parse_count: parse_counter.count(),
-                    program: None,
-                    module: None,
-                    rejection_module_names,
-                    comments,
-                    errors,
-                    suppressed_diagnostics,
-                    authored_grammar: Some(AuthoredGrammarFailure {
-                        message: error.to_string(),
-                        offset,
-                    }),
-                    syntax_failed: true,
-                    panicked: false,
-                })
-            }
-            // Every other variant describes an inconsistent scaffold contract, which is a
-            // projector or adapter defect rather than anything the author wrote.
-            _ => Err(ProjectedParseError::Invariant(error.to_string())),
-        };
-    }
+    )
+    .map_err(|error| ProjectedParseError::Invariant(error.to_string()))?;
     if request.show_semantic_errors && !syntax_failed {
         let semantic = SemanticBuilder::new_compiler().build(&parsed.program);
         append_diagnostics(&mut errors, semantic.diagnostics.iter(), DiagnosticPhase::Semantic)?;
@@ -353,7 +324,7 @@ fn parse_to_projected_tape_with_retention(
         comments,
         errors,
         suppressed_diagnostics,
-        authored_grammar: None,
+        invalid_dynamic_tags,
         syntax_failed,
         panicked: parsed.fatal_error,
     })

@@ -96,6 +96,14 @@ impl Scanner<'_> {
                 expected: "a valid dynamic JSX tag expression",
             });
         }
+        // A spread (`<{...a} />`) is no expression, so it can't be read as a tag. `@tsrx/core`
+        // raises it at the container's opening brace.
+        if self.bytes.get(identity.start as usize..).is_some_and(|rest| rest.starts_with(b"...")) {
+            return Err(ProjectionError::MalformedSyntax {
+                offset: span.start.saturating_sub(1),
+                expected: "a valid dynamic JSX tag expression",
+            });
+        }
         Ok(identity)
     }
 

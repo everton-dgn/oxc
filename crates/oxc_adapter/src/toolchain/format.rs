@@ -814,7 +814,9 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_tag_validator_rejects_authoritative_disallowed_ast_shapes() {
+    fn dynamic_tag_validator_formats_expressions_core_only_reports() {
+        // `@tsrx/core` reports these without failing the parse, and its formatters still format
+        // the file, so the scaffold validator must accept them.
         for expression in [
             "/x/",
             "null as any",
@@ -832,9 +834,7 @@ mod tests {
             "fn<string>()",
             "key in [Tag]",
         ] {
-            let error = format_dynamic(expression).unwrap_err().to_string();
-            assert!(error.contains("dynamic tag"), "{expression}: {error}");
-            assert!(error.contains("source byte 0"), "{expression}: {error}");
+            assert!(format_dynamic(expression).is_ok(), "{expression}");
         }
     }
 

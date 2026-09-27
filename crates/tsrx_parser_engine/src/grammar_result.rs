@@ -2,8 +2,7 @@
 //! caller sees rejection as data and never as an `Err`.
 
 use oxc_adapter::parser::{
-    AuthoredGrammarFailure, RejectionModuleNames, parse_failed_tsrx_metadata,
-    render_diagnostic_codeframes,
+    RejectionModuleNames, parse_failed_tsrx_metadata, render_diagnostic_codeframes,
 };
 use tsrx_syntax::ProjectionError;
 use tsrx_tape_schema::{
@@ -14,32 +13,6 @@ use crate::{
     TsrxParseError, TsrxParseResult,
     pipeline::{rejection_metadata, require_one_oxc_parse},
 };
-
-pub(super) fn adapter_grammar_result(
-    source: &str,
-    filename: &str,
-    comments: CommentTable,
-    failure: &AuthoredGrammarFailure,
-    rejection_module_names: RejectionModuleNames,
-) -> Result<TsrxParseResult, TsrxParseError> {
-    let source_len = u32::try_from(source.len()).map_err(|_| {
-        TsrxParseError::ResourceExhausted("ASCII source exceeds the 4 GiB span limit")
-    })?;
-    if failure.offset > source_len {
-        return Err(TsrxParseError::Unsupported(
-            "authored dynamic-tag diagnostic is outside source",
-        ));
-    }
-    let end = failure.offset.saturating_add(1).min(source_len);
-    grammar_result_with_rejection_module_names(
-        source,
-        filename,
-        comments,
-        &failure.message,
-        Some(TapeSpan::new(failure.offset, end)),
-        rejection_module_names,
-    )
-}
 
 pub(super) fn projection_grammar_result(
     source: &str,

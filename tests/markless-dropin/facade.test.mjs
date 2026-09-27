@@ -761,25 +761,64 @@ test("a stray greater-than diagnostic anchors on the extra token like @tsrx/core
   );
 });
 
-test("dynamic-tag call diagnostics use @tsrx/core 0.1.32's user-facing message", () => {
-  const candidateMessage =
-    "TSRX dynamic tag 0 at source byte 56 must be an identifier, member, static string, or runtime expression without calls, construction, spreads, concatenation, interpolation, objects, or arrays";
-  const referenceMessage =
-    "Dynamic element names must be an identifier, member expression, static string, or runtime expression; calls, spreads, string concatenation, string interpolation, and static null, undefined, boolean, number, object, and array literals are not valid tag names.";
+test("dynamic-tag reports carry @tsrx/core 0.5's message and code without failing collect", () => {
+  const message =
+    "A dynamic tag expression must be an identifier, a member access such as `props.as` or `registry[name]`, or a string literal. Compute anything else before the element: `const Tag = c ? Child : Fallback;`, then `<{Tag} />`.";
+  const program = makeProgram();
+  const api = createTsrxCoreCompat({
+    parseSync() {
+      return { program, comments: [], errors: [makeNativeError(message)] };
+    },
+  });
+  const source = "export function App() @{ <{tag()}/> }";
+
+  assert.throws(
+    () => api.parseModule(source, "DynamicTagCall.tsrx"),
+    (error) =>
+      error instanceof SyntaxError &&
+      error.message === message &&
+      error.code === "tsrx-dynamic-tag-expression" &&
+      error.type === "fatal",
+  );
+  const errors = [];
+  assert.equal(api.parseModule(source, "DynamicTagCall.tsrx", { collect: true, errors }), program);
+  assert.deepEqual(
+    errors.map((error) => [error.message, error.code, error.type, error.pos, error.end]),
+    [[message, "tsrx-dynamic-tag-expression", "usage", 13, 14]],
+  );
+});
+
+test("a dynamic tag that is no expression throws core's acorn-shaped error in every mode", () => {
   const api = createTsrxCoreCompat({
     parseSync() {
       return {
         program: null,
         comments: [],
-        errors: [makeNativeError(candidateMessage)],
+        errors: [
+          makeNativeError("malformed TSRX at byte 13: expected a valid dynamic JSX tag expression"),
+        ],
       };
     },
   });
-
-  assert.throws(
-    () => api.parseModule("export function App() @{ <{tag()}/> }", "DynamicTagCall.tsrx"),
-    (error) => error instanceof SyntaxError && error.message === referenceMessage,
-  );
+  const source = "export function App() @{ <{...a}/> }";
+  for (const options of [undefined, { collect: true, errors: [] }, { loose: true, errors: [] }]) {
+    assert.throws(
+      () => api.parseModule(source, "DynamicTagSpread.tsrx", options),
+      (error) => {
+        assert.ok(error instanceof SyntaxError);
+        assert.equal(
+          error.message,
+          "A dynamic tag expression must be an identifier, a member access such as `props.as` or `registry[name]`, or a string literal. Compute anything else before the element: `const Tag = c ? Child : Fallback;`, then `<{Tag} />`. (1:13)",
+        );
+        assert.equal(error.pos, 13);
+        assert.deepEqual(error.loc, { line: 1, column: 13 });
+        assert.equal(error.end, undefined);
+        assert.equal(error.code, undefined);
+        return true;
+      },
+    );
+    assert.deepEqual(options?.errors ?? [], []);
+  }
 });
 
 for (const mode of ["collect", "loose"]) {

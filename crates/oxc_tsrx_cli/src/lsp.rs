@@ -17,7 +17,7 @@ use std::{
 };
 
 use oxc_adapter::{
-    JsPluginFreeLintConfig, LintError as EngineLintError,
+    JsPluginFreeLintConfig,
     editor::{
         EditorActionKind, EditorCodeAction, EditorCodeActionRequest, EditorDiagnostic,
         EditorDocument, EditorDocumentEdit, EditorRange, EditorSeverity, EditorTextEdit,
@@ -960,13 +960,13 @@ fn unavailable_diagnostic(source: &str, reason: &str) -> EditorDiagnostic {
 }
 
 fn parse_error_diagnostic(source: &str, error: &LintError) -> EditorDiagnostic {
-    // Two of the ten variants position themselves in the authored source, and both hand the
-    // offset over as a number. The remaining eight describe a whole-file or tool failure, so the
-    // diagnostic covers the first character. This match is written out rather than wildcarded so
+    // Two of the ten variants position themselves in the authored source: a projection failure
+    // hands its offset over as a number, and an unparsed file its first diagnostic label. The
+    // remaining eight describe a whole-file or tool failure, so the diagnostic covers the first
+    // character. A dynamic tag expression `@tsrx/core` only reports never fails a lint. This match is written out rather than wildcarded so
     // a future positioned variant fails to compile here instead of silently losing its offset.
     let positioned = match error {
         LintError::Projection(error) => error.byte_offset(),
-        LintError::Syntax(EngineLintError::DynamicTags(error)) => error.byte_offset(),
         LintError::Unparsed(unparsed) => unparsed
             .diagnostics
             .iter()
@@ -1020,10 +1020,10 @@ fn ranges_overlap(left: EditorRange, right: EditorRange) -> bool {
 mod tests {
     use std::path::Path;
 
-    use oxc_adapter::{DynamicTagError, editor::EditorRange};
+    use oxc_adapter::editor::EditorRange;
     use tsrx_lint::{LintError, LintSession};
 
-    use super::{EngineLintError, parse_error_diagnostic};
+    use super::parse_error_diagnostic;
 
     /// The range `parse_error_diagnostic` produced while it read the offset out of the rendered
     /// `Display` text: the last `byte ` anywhere in the whole message, then its digits.
@@ -1060,47 +1060,40 @@ mod tests {
 
     #[test]
     fn the_typed_offset_reproduces_the_display_scrape_it_replaced() {
-        // Both positioned variants, each reached through a real lint of a real authored source
-        // rather than by hand: an unterminated element fails in projection, and a call expression
-        // in a dynamic tag survives projection and fails against the parsed AST. The multi-byte
-        // identifier in the first fixture shifts the offset off a code-unit count.
-        let unterminated =
+        // The positioned variant, reached through a real lint of a real authored source rather
+        // than by hand: an unterminated element fails in projection. The multi-byte identifier
+        // shifts the offset off a code-unit count.
+        let source =
             "export function Broken() @{\n  let \u{3c0} = 1;\n  <main>\n    <h1>hi</h1>\n}\n";
-        let dynamic_tag = "export function View() @{ <{tag()}>hi</{tag()}> }";
-        for (source, reaches_the_syntax_lane) in [(unterminated, false), (dynamic_tag, true)] {
-            let error = lint_failure(source);
-            // Each fixture must exercise a different arm, or one of the two would go untested.
-            assert_eq!(
-                matches!(error, LintError::Syntax(EngineLintError::DynamicTags(_))),
-                reaches_the_syntax_lane,
-                "{source}: {error:?}"
-            );
-            assert!(
-                matches!(
-                    error,
-                    LintError::Projection(_) | LintError::Syntax(EngineLintError::DynamicTags(_))
-                ),
-                "{source}: {error:?}"
-            );
-            let message = error.to_string();
-            assert!(message.contains("byte "), "{source}: {message}");
-            let diagnostic = parse_error_diagnostic(source, &error);
-            assert_eq!(diagnostic.range, scraped_range(source, &message), "{source}: {message}");
-            assert_ne!(diagnostic.range.start, 0, "{source}: {message}");
-            assert_eq!(diagnostic.message, message);
-        }
+        let error = lint_failure(source);
+        assert!(matches!(error, LintError::Projection(_)), "{source}: {error:?}");
+        let message = error.to_string();
+        assert!(message.contains("byte "), "{source}: {message}");
+        let diagnostic = parse_error_diagnostic(source, &error);
+        assert_eq!(diagnostic.range, scraped_range(source, &message), "{source}: {message}");
+        assert_ne!(diagnostic.range.start, 0, "{source}: {message}");
+        assert_eq!(diagnostic.message, message);
+    }
+
+    #[test]
+    fn a_dynamic_tag_expression_core_only_reports_does_not_block_linting() {
+        // `@tsrx/core` reports a call in a dynamic tag without failing the parse, and its
+        // formatters still format the file, so the lint lane must not refuse it either.
+        let source = "export function View() @{ <{tag()}>hi</{tag()}> }";
+        LintSession::new_with_config_source(Path::new("/demo"), Some("{}"), &[], false)
+            .expect("an in-memory config compiles without reading the filesystem")
+            .lint_text(Path::new("View.tsrx"), source)
+            .expect("a reported dynamic tag expression still lints");
     }
 
     #[test]
     fn an_unaddressable_or_positionless_failure_still_lands_on_the_first_character() {
         // A stale offset past the end of the editor's buffer and a variant that never carries one
         // both fall back to the first character, which is what the scrape did too.
+        let stale = lint_failure(
+            "export function Broken() @{\n  let \u{3c0} = 1;\n  <main>\n    <h1>hi</h1>\n}\n",
+        );
         let source = "short";
-        let stale =
-            LintError::Syntax(EngineLintError::DynamicTags(DynamicTagError::AuthoredGrammar {
-                index: 0,
-                offset: 4096,
-            }));
         for error in [stale, LintError::TextLintWithFixes] {
             let diagnostic = parse_error_diagnostic(source, &error);
             assert_eq!(diagnostic.range, scraped_range(source, &error.to_string()), "{error:?}");
