@@ -270,12 +270,11 @@ impl Scanner<'_> {
             return Ok(close_end);
         }
 
-        // The text run in progress began after the opening tag or the last child. A `//` is a
-        // comment only where nothing but spaces and tabs precede it on its line or in its run.
+        // The text run in progress began after the opening tag or the last child; a `//` that
+        // starts it is a comment.
         let mut run_start = index;
-        let mut run_has_comment = false;
-        // A comment in this element's text can swallow its closing tag. `@tsrx/core` then ends
-        // the element at the `}` that closes the template, or at the end of the source.
+        // A comment in this element's text swallowed a closing tag. `@tsrx/core` then ends the
+        // element at the `}` that closes the template, or at the end of the source.
         let mut closing_may_be_swallowed = false;
         loop {
             let Some(&byte) = self.bytes.get(index) else {
@@ -289,7 +288,6 @@ impl Scanner<'_> {
             };
             match byte {
                 b'<' if self.bytes.get(index + 1) == Some(&b'/') => {
-                    self.finish_text_run(run_start, index, run_has_comment)?;
                     let close_start = index;
                     index += 2;
                     let closing_dynamic = self.bytes.get(index) == Some(&b'{');
@@ -411,7 +409,6 @@ impl Scanner<'_> {
                     return Ok(index + 1);
                 }
                 b'<' if self.looks_like_jsx_start(index) => {
-                    self.finish_text_run(run_start, index, run_has_comment)?;
                     let implicit_closes = self.implicit_closes.len();
                     index = self.scan_jsx_element(index)?;
                     // A child a `}` closed early leaves this element open at the same `}`.
@@ -420,41 +417,35 @@ impl Scanner<'_> {
                     {
                         closing_may_be_swallowed = true;
                     }
-                    (run_start, run_has_comment) = (index, false);
+                    run_start = index;
                 }
                 b'{' => {
-                    self.finish_text_run(run_start, index, run_has_comment)?;
                     index = self.scan_expression_region(index + 1, Some(b'}'))?;
-                    (run_start, run_has_comment) = (index, false);
+                    run_start = index;
                 }
                 b'@' if self.keyword_at(index, b"if") && self.control_has_header(index, b"if") => {
-                    self.finish_text_run(run_start, index, run_has_comment)?;
                     index = self.parse_if(index, ControlContext::JsxChild)?;
-                    (run_start, run_has_comment) = (index, false);
+                    run_start = index;
                 }
                 b'@' if self.keyword_at(index, b"for")
                     && self.control_has_header(index, b"for") =>
                 {
-                    self.finish_text_run(run_start, index, run_has_comment)?;
                     index = self.parse_for(index, ControlContext::JsxChild)?;
-                    (run_start, run_has_comment) = (index, false);
+                    run_start = index;
                 }
                 b'@' if self.keyword_at(index, b"switch")
                     && self.control_has_header(index, b"switch") =>
                 {
-                    self.finish_text_run(run_start, index, run_has_comment)?;
                     index = self.parse_switch(index, ControlContext::JsxChild)?;
-                    (run_start, run_has_comment) = (index, false);
+                    run_start = index;
                 }
                 b'@' if self.keyword_at(index, b"try") && self.control_has_body(index, b"try") => {
-                    self.finish_text_run(run_start, index, run_has_comment)?;
                     index = self.parse_try(index, ControlContext::JsxChild)?;
-                    (run_start, run_has_comment) = (index, false);
+                    run_start = index;
                 }
                 b'@' if self.bytes.get(index + 1) == Some(&b'{') => {
-                    self.finish_text_run(run_start, index, run_has_comment)?;
                     index = self.scan_parser_code_block(index, ParserCodeBlockKind::JsxChild)?;
-                    (run_start, run_has_comment) = (index, false);
+                    run_start = index;
                 }
                 b'@' => {
                     if self.keyword_at(index, b"else")
@@ -481,26 +472,25 @@ impl Scanner<'_> {
                 }
                 // `@tsrx/core` 0.5 reads JavaScript comments in JSX text as comments, before it
                 // looks for tags or braces, so a comment can hold a `<`, `{`, `}`, or a whole tag.
+                // With no `*/`, a block comment runs to the end of the source.
                 b'/' if self.bytes.get(index + 1) == Some(&b'*') => {
-                    // With no `*/`, the comment runs to the end of the source.
                     let body_end = find_bytes(&self.bytes[index + 2..], b"*/")
                         .map_or(self.bytes.len(), |relative| index + 2 + relative);
                     let end = (body_end + 2).min(self.bytes.len());
                     self.mark_surrogates(index + 2, body_end, OpaqueSurrogateContext::Comment);
-                    self.jsx_text_comments.push(ByteSpan::new(to_u32(index)?, to_u32(end)?));
-                    (run_has_comment, closing_may_be_swallowed) = (true, true);
+                    closing_may_be_swallowed |=
+                        self.text_comment(index, end)? || body_end == self.bytes.len();
                     index = end;
                 }
                 b'/' if self.bytes.get(index + 1) == Some(&b'/')
-                    && text_line_comment_starts(self.bytes, index, run_start) =>
+                    && (index == run_start
+                        || matches!(self.bytes[index - 1], b' ' | b'\t' | b'\n' | b'\r')) =>
                 {
                     let end = self.skip_line_comment(index + 2);
-                    self.jsx_text_comments.push(ByteSpan::new(to_u32(index)?, to_u32(end)?));
-                    (run_has_comment, closing_may_be_swallowed) = (true, true);
+                    closing_may_be_swallowed |= self.text_comment(index, end)?;
                     index = end;
                 }
                 b'}' if closing_may_be_swallowed => {
-                    self.finish_text_run(run_start, index, run_has_comment)?;
                     if dynamic {
                         // No projection can restore a dynamic closing tag it never saw.
                         return Err(self.unclosed_tag(index, display_name)?);
@@ -517,34 +507,10 @@ impl Scanner<'_> {
         }
     }
 
-    /// Records the run of JSX text `[start, end)` when it holds a comment, for the formatter
-    /// projection, which holds the run out of Oxfmt whole. Edge whitespace stays outside, where
-    /// Oxfmt keeps a significant space and rewrites layout, except the spaces before a leading
-    /// line comment: the comment's line break makes them layout, but Oxfmt would read them as a
-    /// significant space.
-    fn finish_text_run(
-        &mut self,
-        start: usize,
-        end: usize,
-        has_comment: bool,
-    ) -> Result<(), ProjectionError> {
-        if !has_comment {
-            return Ok(());
-        }
-        let is_jsx_whitespace = |byte: &u8| matches!(byte, b' ' | b'\t' | b'\n' | b'\r');
-        let text = &self.bytes[start..end];
-        let leading = text.iter().take_while(|byte| is_jsx_whitespace(byte)).count();
-        let trailing =
-            text[leading..].iter().rev().take_while(|byte| is_jsx_whitespace(byte)).count();
-        let leading_layout = text[..leading].iter().any(|byte| matches!(byte, b'\n' | b'\r'));
-        let content_start = if !leading_layout && text[leading..].starts_with(b"//") {
-            start
-        } else {
-            start + leading
-        };
-        self.jsx_text_comment_runs
-            .push(ByteSpan::new(to_u32(content_start)?, to_u32(end - trailing)?));
-        Ok(())
+    /// Records the comment `[start, end)` in JSX text, and whether it holds a closing tag.
+    fn text_comment(&mut self, start: usize, end: usize) -> Result<bool, ProjectionError> {
+        self.jsx_text_comments.push(ByteSpan::new(to_u32(start)?, to_u32(end)?));
+        Ok(find_bytes(&self.bytes[start..end], b"</").is_some())
     }
 
     fn unclosed_tag(
@@ -726,21 +692,6 @@ fn find_script_body_end(bytes: &[u8], content_start: usize) -> Option<(usize, us
 /// HTML's whitespace: tab, line feed, form feed, carriage return, and space.
 const fn is_html_whitespace(byte: u8) -> bool {
     matches!(byte, b'\t' | b'\n' | 0x0c | b'\r' | b' ')
-}
-
-/// A `//` in JSX text is a comment when only spaces and tabs precede it on its line, or since the
-/// text run began after a tag, a child element, or a braced child (`@tsrx/core` 0.5). Once real
-/// text has begun on the line, `//` is text, so `a // b` and `https://...` stay text.
-fn text_line_comment_starts(bytes: &[u8], index: usize, run_start: usize) -> bool {
-    let mut cursor = index;
-    while cursor > run_start {
-        match bytes[cursor - 1] {
-            b' ' | b'\t' => cursor -= 1,
-            b'\n' | b'\r' => return true,
-            _ => return false,
-        }
-    }
-    true
 }
 
 fn jsx_text_looks_structural(bytes: &[u8], index: usize) -> bool {

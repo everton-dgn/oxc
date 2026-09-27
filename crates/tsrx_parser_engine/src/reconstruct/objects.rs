@@ -26,7 +26,6 @@ pub(super) struct ProjectedObjectIndex {
     pub(super) jsx_attributes: Vec<(u32, RecordIndex)>,
     pub(super) jsx_opening_elements: Vec<(u32, RecordIndex)>,
     pub(super) patterns: Vec<(u32, RecordIndex)>,
-    pub(super) layout_containers: Vec<RecordIndex>,
     pub(super) call_objects: Vec<RecordIndex>,
     pub(super) module_objects: Vec<RecordIndex>,
 }
@@ -42,7 +41,6 @@ impl ProjectedObjectIndex {
             jsx_attributes: Vec::new(),
             jsx_opening_elements: Vec::new(),
             patterns: Vec::new(),
-            layout_containers: Vec::new(),
             call_objects: Vec::new(),
             module_objects: Vec::new(),
         }
@@ -54,9 +52,6 @@ impl ProjectedObjectIndex {
         kind: Option<&str>,
         start: Option<u32>,
     ) -> Result<(), TsrxParseError> {
-        if matches!(kind, Some(r#""JSXElement""# | r#""JSXFragment""#)) {
-            self.layout_containers.push(object);
-        }
         let target = match kind {
             Some(r#""IfStatement""#) => Some(&mut self.if_objects),
             Some(r#""ForStatement""# | r#""ForInStatement""# | r#""ForOfStatement""#) => {

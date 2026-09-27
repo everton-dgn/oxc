@@ -3,7 +3,7 @@
 
 use std::fmt::Write as _;
 
-use super::mapping::{ImplicitCloser, MappedProjection};
+use super::mapping::{MappedProjection, SyntheticAnchor};
 use crate::{
     diagnostics::{ProjectionError, to_u32},
     model::{
@@ -26,7 +26,7 @@ pub(super) struct Builder<'a> {
     text_comment: usize,
     /// Next unwritten entry of `overlay.implicit_closes`.
     implicit_close: usize,
-    implicit_closers: Vec<ImplicitCloser>,
+    anchors: Vec<SyntheticAnchor>,
 }
 impl<'a> Builder<'a> {
     pub(super) fn new(source: &'a str, overlay: &'a Overlay, prefix: &'a str) -> Self {
@@ -59,7 +59,7 @@ impl<'a> Builder<'a> {
             synthetic_callee_spans: Vec::new(),
             text_comment: 0,
             implicit_close: 0,
-            implicit_closers: Vec::new(),
+            anchors: Vec::new(),
         }
     }
 
@@ -78,7 +78,7 @@ impl<'a> Builder<'a> {
             dynamic_offsets: Vec::new(),
             synthetic_generator_spans: Vec::new(),
             synthetic_callee_spans: self.synthetic_callee_spans,
-            implicit_closers: self.implicit_closers,
+            anchors: self.anchors,
         })
     }
 
@@ -101,10 +101,9 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// Copies an authored span. A JavaScript comment in JSX text inside it is written as
-    /// whitespace of the same length and line breaks, so OXC reads the text around it as one run
-    /// without the comment, and a closing tag a comment swallowed is written before the `}` that
-    /// ends its element.
+    /// Copies an authored span. A JavaScript comment in JSX text inside it is written in braces,
+    /// `{/* ... */}` or `{// ...` and a line break, the empty child TSX reads as a comment, and a
+    /// closing tag a comment swallowed is written before the `}` that ends its element.
     fn copy_original(&mut self, span: ByteSpan) -> Result<(), ProjectionError> {
         let comments = &self.overlay.jsx_text_comments;
         let closes = &self.overlay.implicit_closes;
@@ -139,7 +138,12 @@ impl<'a> Builder<'a> {
                 if comment.end > span.end {
                     return Err(ProjectionError::StructuralMismatch);
                 }
-                self.blank_text_comment(comment)?;
+                // The braces stand for the comment's ends, so the container and its empty
+                // expression span exactly the comment.
+                self.push_anchored("{", comment.start)?;
+                self.copy_verbatim(comment)?;
+                let line = self.source.as_bytes().get(comment.start as usize + 1) == Some(&b'/');
+                self.push_anchored(if line { "\n}" } else { "}" }, comment.end)?;
                 self.text_comment += 1;
                 start = comment.end;
                 continue;
@@ -165,33 +169,19 @@ impl<'a> Builder<'a> {
                 .source
                 .get(close.name.start as usize..close.name.end as usize)
                 .ok_or(ProjectionError::SourceChanged { offset: close.name.start })?;
-            let projected_start = to_u32(self.output.len())?;
-            write!(self.output, "</{name}>").expect("writing to a String cannot fail");
-            self.implicit_closers.push(ImplicitCloser {
-                projected: ByteSpan::new(projected_start, to_u32(self.output.len())?),
-                original: close.offset,
-            });
+            self.push_anchored(&format!("</{name}>"), close.offset)?;
             self.implicit_close += 1;
         }
         Ok(())
     }
 
-    /// Writes one comment in JSX text as spaces, keeping its line breaks, and records it as a
-    /// non-fixable segment: offsets inside it still map back, but no fix may land in it.
-    fn blank_text_comment(&mut self, comment: ByteSpan) -> Result<(), ProjectionError> {
-        let Some(value) = self.source.get(comment.start as usize..comment.end as usize) else {
-            return Err(ProjectionError::SourceChanged { offset: comment.start });
-        };
-        let projected_start = to_u32(self.output.len())?;
-        self.output.extend(
-            value
-                .bytes()
-                .map(|byte| if matches!(byte, b'\n' | b'\r') { byte as char } else { ' ' }),
-        );
-        self.segments.push(ProjectionSegment {
-            projected: ByteSpan::new(projected_start, to_u32(self.output.len())?),
-            original_start: comment.start,
-            fixable: false,
+    /// Writes generated text that stands for the authored offset `original`.
+    fn push_anchored(&mut self, text: &str, original: u32) -> Result<(), ProjectionError> {
+        let start = to_u32(self.output.len())?;
+        self.output.push_str(text);
+        self.anchors.push(SyntheticAnchor {
+            projected: ByteSpan::new(start, to_u32(self.output.len())?),
+            original,
         });
         Ok(())
     }
@@ -211,7 +201,6 @@ impl<'a> Builder<'a> {
         self.output.push_str(value);
         let projected_end = to_u32(self.output.len())?;
         if let Some(previous) = self.segments.last_mut()
-            && previous.fixable
             && previous.projected.end == projected_start
             && previous.original_start + (previous.projected.end - previous.projected.start)
                 == span.start

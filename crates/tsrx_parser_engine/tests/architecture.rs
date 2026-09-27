@@ -32,7 +32,6 @@ fn the_parser_engine_keeps_one_concept_per_private_module_file() {
         "src/reconstruct/edits.rs",
         "src/reconstruct/if_chain.rs",
         "src/reconstruct/jsx_statements.rs",
-        "src/reconstruct/layout_text.rs",
         "src/reconstruct/loops.rs",
         "src/reconstruct/objects.rs",
         "src/reconstruct/program.rs",

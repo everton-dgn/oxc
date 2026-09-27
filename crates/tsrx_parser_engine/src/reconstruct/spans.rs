@@ -1,7 +1,7 @@
 //! Authored offsets recorded as nodes are rewritten, and the closing pass that lifts every
 //! reachable span out of projected coordinates and back onto the author's source.
 
-use tsrx_syntax::{ByteSpan, ImplicitCloser, ProjectionSegment};
+use tsrx_syntax::{ByteSpan, ProjectionSegment, SyntheticAnchor};
 use tsrx_tape_schema::{FlatTape, RecordIndex, ValueRef};
 
 use crate::{
@@ -95,7 +95,7 @@ pub(super) fn record_authored_span(
 pub(crate) fn finalize_reachable_spans(
     tape: &mut FlatTape,
     segments: &[ProjectionSegment],
-    implicit_closers: &[ImplicitCloser],
+    anchors: &[SyntheticAnchor],
     authored_positions: &[AuthoredStart],
     finalization_index: &FinalizationIndex,
 ) -> Result<(), TsrxParseError> {
@@ -116,7 +116,7 @@ pub(crate) fn finalize_reachable_spans(
             })?;
             span_fields = object_span_fields(tape, RecordIndex::new(raw));
         }
-        finalize_object_span(tape, span_fields, segments, implicit_closers, authored)?;
+        finalize_object_span(tape, span_fields, segments, anchors, authored)?;
     }
     Ok(())
 }
@@ -125,14 +125,14 @@ fn finalize_object_span(
     tape: &mut FlatTape,
     fields: SpanFields,
     segments: &[ProjectionSegment],
-    implicit_closers: &[ImplicitCloser],
+    anchors: &[SyntheticAnchor],
     authored: Option<AuthoredStart>,
 ) -> Result<(), TsrxParseError> {
     let start = finalize_span_endpoint(
         tape,
         fields.start,
         segments,
-        implicit_closers,
+        anchors,
         true,
         authored.map(|position| position.start),
     )?;
@@ -140,7 +140,7 @@ fn finalize_object_span(
         tape,
         fields.end,
         segments,
-        implicit_closers,
+        anchors,
         false,
         authored.and_then(|position| position.end),
     )?;
@@ -159,7 +159,7 @@ fn finalize_span_endpoint(
     tape: &mut FlatTape,
     field: Option<RecordIndex>,
     segments: &[ProjectionSegment],
-    implicit_closers: &[ImplicitCloser],
+    anchors: &[SyntheticAnchor],
     is_start: bool,
     authored: Option<u32>,
 ) -> Result<Option<ValueRef>, TsrxParseError> {
@@ -182,14 +182,11 @@ fn finalize_span_endpoint(
             .ok_or(TsrxParseError::Unsupported("non-numeric ESTree span"))?;
         map_reachable_endpoint(segments, projected, is_start)
             .or_else(|| {
-                // A closing tag the projection wrote for an element a `}` ended early stands
-                // for that `}`: the closing element is empty there.
-                implicit_closers
-                    .iter()
-                    .find(|closer| {
-                        closer.projected.start <= projected && projected <= closer.projected.end
-                    })
-                    .map(|closer| closer.original)
+                // Generated text that stands for an authored offset: the braces around a
+                // comment in JSX text, or a closing tag written for an element a `}` ended.
+                let index = anchors.partition_point(|anchor| anchor.projected.start <= projected);
+                let anchor = anchors.get(index.checked_sub(1)?)?;
+                (projected <= anchor.projected.end).then_some(anchor.original)
             })
             .ok_or(TsrxParseError::Unsupported("reachable synthetic ESTree span"))?
     };

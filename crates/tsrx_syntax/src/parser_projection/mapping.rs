@@ -18,13 +18,13 @@ pub struct MappedProjection {
     pub(super) dynamic_offsets: Vec<u32>,
     pub(super) synthetic_generator_spans: Vec<ByteSpan>,
     pub(super) synthetic_callee_spans: Vec<(u32, u32)>,
-    pub(super) implicit_closers: Vec<ImplicitCloser>,
+    pub(super) anchors: Vec<SyntheticAnchor>,
 }
 
-/// A closing tag the parser projection wrote for an element a `}` ended early: its projected
-/// bytes, and the authored `}` every offset inside them stands for.
+/// Generated text that stands for one authored offset: the braces around a comment in JSX text
+/// stand for its ends, and a closing tag written for an element a `}` ended early for that `}`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ImplicitCloser {
+pub struct SyntheticAnchor {
     pub projected: ByteSpan,
     pub original: u32,
 }
@@ -94,11 +94,10 @@ impl MappedProjection {
         &self.synthetic_callee_spans
     }
 
-    /// Closing tags written for elements a `}` ended before their own closing tag, in
-    /// projected order.
+    /// Generated text that stands for an authored offset, in projected order.
     #[must_use]
-    pub fn implicit_closers(&self) -> &[ImplicitCloser] {
-        &self.implicit_closers
+    pub fn anchors(&self) -> &[SyntheticAnchor] {
+        &self.anchors
     }
 }
 

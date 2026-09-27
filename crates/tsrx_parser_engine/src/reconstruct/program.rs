@@ -19,7 +19,6 @@ use super::{
     control::normalize_control_body_lists,
     dynamic_tags::reconstruct_dynamic_tags,
     if_chain::IfReconstructor,
-    layout_text::normalize_template_layout_text,
     loops::{LoopReconstructor, build_header_ordinals},
     objects::ProjectedObjectIndex,
     script::reconstruct_script_elements,
@@ -137,14 +136,6 @@ pub(crate) fn reconstruct_projected(
         &code_blocks,
         &parents,
         &mut starts,
-        &mut list_removals,
-    )?;
-    normalize_template_layout_text(
-        tape,
-        authored,
-        segments,
-        overlay.jsx_text_comments,
-        &object_index.layout_containers,
         &mut list_removals,
     )?;
     tape.remove_list_values(

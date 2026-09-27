@@ -348,9 +348,11 @@ fn assigned_code_block_keeps_theme_in_setup_and_applying_fragment() {
     require_type(tape, body[0], "VariableDeclaration");
     let render = object_field(tape, block, "render");
     require_type(tape, render, "JSXFragment");
+    // Every text is kept, the layout between the children included.
     let children = objects(&list_field(tape, render, "children"));
-    assert_style_body(tape, children[0], CSS, &["apply"], Some("Identifier"));
-    assert_element(tape, children[1], "div");
+    assert_eq!(children.len(), 5);
+    assert_style_body(tape, children[1], CSS, &["apply"], Some("Identifier"));
+    assert_element(tape, children[3], "div");
     assert_no_scaffold(tape);
 }
 

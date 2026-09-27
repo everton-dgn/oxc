@@ -9,4 +9,4 @@ mod marker;
 mod validate;
 
 pub use entry::project_for_parser;
-pub use mapping::{ImplicitCloser, MappedProjection};
+pub use mapping::{MappedProjection, SyntheticAnchor};

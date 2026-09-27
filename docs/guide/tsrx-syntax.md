@@ -121,25 +121,28 @@ never CSS-formatted or CSS-validated.
 
 As in `@tsrx/core` 0.5, anything that looks like a JavaScript comment in JSX
 text is a comment, not text. A `/* ... */` is a comment anywhere in the text.
-A `//` is a comment up to the end of its line when nothing but spaces and tabs
-come before it on that line, or since the tag, element, or `{...}` child just
-before it:
+A `//` is a comment up to the end of its line when a space, a tab, or a line
+break comes right before it, or when it starts the text right after a tag, a
+`{...}` child, or a block. A `//` touching other text, as in `https://` or
+`a//b`, is text:
 
 ```tsrx
 <div>
-  Visible text
+  Visible text // a note after a space is a comment
   // <Debug /> is commented out, and so is {value} here
   /* a block comment can span lines and hold tags or braces */
-  more text a // after text on the same line, this is text
+  see https://tsrx.dev, this is text
 </div>
 ```
 
 The comment is read before tags and braces, so it can hold a whole element, a
-`{...}` child, a `}`, or a `<`. It is left out of the text around it, and it
-shows up with the other comments. `oxc-tsrx lint` reads it as a comment too, so
-a variable mentioned only inside one is still unused. `oxc-tsrx fmt` keeps each
-run of text that holds a comment as you wrote it, only re-indented, so a line
-comment never ends up joined to the text after it.
+`{...}` child, a `}`, or a `<`. In the tree, an element's children look exactly
+as they would in TSX if you had written each comment as `{/* ... */}`: every
+comment is an empty `{}` child that spans just the comment, and all the text
+around it is kept as written, whitespace included. `oxc-tsrx lint` reads it as
+a comment too, so a variable mentioned only inside one is still unused.
+`oxc-tsrx fmt` formats each comment the way Oxfmt formats a `{/* ... */}`
+child, then writes it back without the braces.
 
 To write the characters as text, escape one of them: `&#47;*` or `&#47;&#47;`.
 A comment that runs over its element's closing tag, such as `<p>// note</p>`,

@@ -132,73 +132,6 @@ fn code_block_without_terminal_jsx_has_an_explicit_null_render() {
 }
 
 #[test]
-fn native_template_children_drop_layout_text_but_keep_inline_space() {
-    let source =
-        concat!("function View() @{ <main>\n", "  <span>x</span>\n", "  <b/> <i/>\n", "</main> }",);
-    let result = parse_tsrx(&TsrxParseRequest { source }).expect("native template whitespace");
-    let tape = result.program();
-    let program = tape.root().as_object().expect("Program root");
-    let function = list_field(tape, program, "body")[0].as_object().expect("FunctionDeclaration");
-    let code_block = object_field(tape, function, "body");
-    let main = object_field(tape, code_block, "render");
-    let children = list_field(tape, main, "children");
-
-    let kinds = children
-        .iter()
-        .map(|value| scalar_field(tape, value.as_object().expect("JSX child object"), "type"))
-        .collect::<Vec<_>>();
-    assert_eq!(kinds, [r#""JSXElement""#, r#""JSXElement""#, r#""JSXText""#, r#""JSXElement""#,]);
-    let inline_space = children[2].as_object().expect("inline JSXText");
-    assert_eq!(scalar_field(tape, inline_space, "value"), r#"" ""#);
-}
-
-#[test]
-fn native_template_children_drop_layout_line_comments() {
-    let source = concat!(
-        "function View() @{ <main>\n",
-        "// markless-allow EXAMPLE: fixture\n",
-        "<span/>\n",
-        "</main> }",
-    );
-    let result = parse_tsrx(&TsrxParseRequest { source }).expect("template line comment");
-    let tape = result.program();
-    let program = tape.root().as_object().expect("Program root");
-    let function = list_field(tape, program, "body")[0].as_object().expect("FunctionDeclaration");
-    let code_block = object_field(tape, function, "body");
-    let main = object_field(tape, code_block, "render");
-    let children = list_field(tape, main, "children");
-    assert_eq!(children.len(), 1);
-    assert_eq!(
-        scalar_field(tape, children[0].as_object().expect("span child"), "type"),
-        r#""JSXElement""#
-    );
-}
-
-#[test]
-fn native_template_text_drops_block_comments_from_value_and_raw() {
-    let source = "function View() @{ <main>before/*M9_CHILDREN*/after<i/>/*only-comment*/</main> }";
-    let result = parse_tsrx(&TsrxParseRequest { source }).expect("template block comments");
-    let tape = result.program();
-    let program = tape.root().as_object().expect("Program root");
-    let function = list_field(tape, program, "body")[0].as_object().expect("FunctionDeclaration");
-    let code_block = object_field(tape, function, "body");
-    let main = object_field(tape, code_block, "render");
-    let children = list_field(tape, main, "children");
-
-    assert_eq!(children.len(), 2, "comment-only JSX text is not a child");
-    let text = children[0].as_object().expect("JSXText child");
-    assert_eq!(scalar_field(tape, text, "type"), r#""JSXText""#);
-    assert_eq!(scalar_field(tape, text, "value"), r#""beforeafter""#);
-    // `@tsrx/core` 0.5 (tsrx-org/tsrx#711): a comment between children is not text, so `raw`
-    // leaves it out too.
-    assert_eq!(scalar_field(tape, text, "raw"), r#""beforeafter""#);
-    assert_eq!(
-        scalar_field(tape, children[1].as_object().expect("element child"), "type"),
-        r#""JSXElement""#
-    );
-}
-
-#[test]
 fn reconstructs_jsx_child_code_blocks_when_parenthesis_nodes_are_disabled() {
     let source = "function View() @{ <main>@{ const x=1; <span>{x}</span> }</main> }";
     let result = parse_tsrx_with_options(
@@ -224,33 +157,51 @@ fn rendered_children(tape: &FlatTape) -> Vec<ValueRef> {
 }
 
 #[test]
-fn native_template_text_drops_line_comments_from_value_and_raw() {
-    // tsrx-org/oxc#110: a `//` with only whitespace before it on its line is a comment, and the
-    // whitespace around it stays, as in `@tsrx/core` 0.5. Inline `a // note` stays text.
-    let source = "function View() @{\n\t<p>\n\t\ta\n\t\t// note\n\t\tb\n\t</p>\n}";
-    let result = parse_tsrx(&TsrxParseRequest { source }).expect("template line comment");
+fn native_template_children_have_tsx_shape_with_comments_as_empty_containers() {
+    // tsrx-org/oxc#118: as in `@tsrx/core` 0.5, all text is kept exactly as written, and each
+    // comment between children is an empty `{}` spanning exactly the comment.
+    let source = "function View({ x }) @{\n<div>\n  a /* c */ b &#47;* e *&#47;\n  <b />\n  // d\n  @if (x) {\n    <i />\n  } // e\n</div>\n}";
+    let result = parse_tsrx(&TsrxParseRequest { source }).expect("template comments");
     let tape = result.program();
-    let children = rendered_children(tape);
-    assert_eq!(children.len(), 1);
-    let text = children[0].as_object().expect("JSXText child");
-    assert_eq!(scalar_field(tape, text, "type"), r#""JSXText""#);
-    assert_eq!(scalar_field(tape, text, "value"), r#""\n\t\ta\n\t\t\n\t\tb\n\t""#);
-    assert_eq!(scalar_field(tape, text, "raw"), r#""\n\t\ta\n\t\t\n\t\tb\n\t""#);
-
-    let source = "function View() @{\n\t<p>a // note</p>\n}";
-    let result = parse_tsrx(&TsrxParseRequest { source }).expect("inline slashes");
-    let tape = result.program();
-    let children = rendered_children(tape);
-    let text = children[0].as_object().expect("JSXText child");
-    assert_eq!(scalar_field(tape, text, "value"), r#""a // note""#);
-    assert_eq!(scalar_field(tape, text, "raw"), r#""a // note""#);
-
-    let source = "function View() @{\n\t<p>a &#47;* note *&#47; b</p>\n}";
-    let result = parse_tsrx(&TsrxParseRequest { source }).expect("escaped comment opener");
-    let tape = result.program();
-    let children = rendered_children(tape);
-    let text = children[0].as_object().expect("JSXText child");
-    assert_eq!(scalar_field(tape, text, "raw"), r#""a &#47;* note *&#47; b""#);
+    let children = rendered_children(tape)
+        .into_iter()
+        .map(|child| {
+            let child = child.as_object().expect("JSX child object");
+            let (kind, (start, end)) = (scalar_field(tape, child, "type"), span(tape, child));
+            match kind {
+                r#""JSXText""# => {
+                    assert_eq!(
+                        scalar_field(tape, child, "raw"),
+                        scalar_field(tape, child, "value")
+                    );
+                    format!("{}@{start}-{end}", scalar_field(tape, child, "value"))
+                }
+                r#""JSXExpressionContainer""# => {
+                    let empty = object_field(tape, child, "expression");
+                    let (inner_start, inner_end) = span(tape, empty);
+                    let inner = scalar_field(tape, empty, "type");
+                    format!("{{{inner}@{inner_start}-{inner_end}}}@{start}-{end}")
+                }
+                _ => format!("{kind}@{start}-{end}"),
+            }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        children,
+        [
+            r#""\n  a "@29-34"#,
+            r#"{"JSXEmptyExpression"@34-41}@34-41"#,
+            r#"" b &#47;* e *&#47;\n  "@41-62"#,
+            r#""JSXElement"@62-67"#,
+            r#""\n  "@67-70"#,
+            r#"{"JSXEmptyExpression"@70-74}@70-74"#,
+            r#""\n  "@74-77"#,
+            r#""JSXIfExpression"@77-100"#,
+            r#"" "@100-101"#,
+            r#"{"JSXEmptyExpression"@101-105}@101-105"#,
+            r#""\n"@105-106"#,
+        ]
+    );
 }
 
 #[test]
