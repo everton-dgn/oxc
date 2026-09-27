@@ -59,7 +59,7 @@ pub fn lift_formatted(
     let lifted = if projection.text_comment_runs.is_empty() {
         lifted
     } else {
-        lift_text_comment_runs(&lifted, original_source, projection)?
+        lift_text_comment_runs(&lifted, projection)?
     };
     let lifted = lift_tokens(&lifted, projection)?;
     if lifted.contains(&projection.prefix) {

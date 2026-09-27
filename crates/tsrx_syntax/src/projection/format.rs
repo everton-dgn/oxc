@@ -44,6 +44,28 @@ pub(super) struct StyleManifest {
     pub(super) payload: ByteSpan,
 }
 
+/// One JSX text run the formatter projection held out of Oxfmt because it holds a comment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct TextRunManifest {
+    /// The run as the lift writes it back.
+    pub(super) payload: String,
+    pub(super) before: RunEdge,
+    pub(super) after: RunEdge,
+}
+
+/// What separates a held run from its neighbour on one side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RunEdge {
+    /// Layout, or text: Oxfmt may break the line there.
+    Plain,
+    /// A significant space, authored there or moved out of the run. Where Oxfmt breaks the line
+    /// at it, the lift puts the space back on the line of the text it separates.
+    Spaced,
+    /// Nothing, and the run has no text: a line break there would turn its spaces into layout,
+    /// so the lift keeps the run on its neighbour's line.
+    Glued,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ScriptManifest {
     pub(super) payload: ByteSpan,
@@ -88,8 +110,8 @@ pub struct FormatProjection {
     pub(super) dynamic_comments: Vec<ByteSpan>,
     pub(super) styles: Vec<StyleManifest>,
     pub(super) scripts: Vec<ScriptManifest>,
-    /// Authored JSX text runs that hold a comment, restored verbatim by the lift.
-    pub(super) text_comment_runs: Vec<ByteSpan>,
+    /// The JSX text runs that hold a comment, as the lift writes them back.
+    pub(super) text_comment_runs: Vec<TextRunManifest>,
     pub(super) parser_code_blocks: Vec<ParserCodeBlock>,
     pub(super) parser_shorthand_attributes: Vec<ParserShorthandAttribute>,
     pub(super) shape_fingerprint: u128,
@@ -179,7 +201,7 @@ pub fn project_for_format(
         dynamic_comments: overlay.dynamic_comments.clone(),
         styles,
         scripts,
-        text_comment_runs: overlay.jsx_text_comment_runs.clone(),
+        text_comment_runs: built.text_comment_payloads,
         parser_code_blocks: overlay.parser_code_blocks.clone(),
         parser_shorthand_attributes: overlay.parser_shorthand_attributes.clone(),
         shape_fingerprint: structural_fingerprint(overlay),

@@ -905,6 +905,55 @@ mod tests {
     }
 
     #[test]
+    fn jsx_text_comments_keep_the_spaces_around_them() {
+        // Once a comment in JSX text is gone, the whitespace beside it is the text's edge
+        // whitespace, and where it touches a sibling on the same line it renders as a space.
+        // Wherever Oxfmt moves a held run's marker, that space must still render.
+        for (case, source, expected) in [
+            (
+                "probe (a): the space after an edge comment still separates the tag from the text",
+                "export function App() @{\n\t<div className=\"aaaaaaaaaaaaaaaaaaaaaaaa\"><b>qqqqqqqqqqqqqqqqqqqqqqq</b>/* a */ xxxxxxxxxxxxxxxxxxxxx yyyyyyyyyyyy</div>\n}\n",
+                "export function App() @{\n  <div className=\"aaaaaaaaaaaaaaaaaaaaaaaa\">\n    <b>qqqqqqqqqqqqqqqqqqqqqqq</b> /* a */xxxxxxxxxxxxxxxxxxxxx yyyyyyyyyyyy\n  </div>;\n}\n",
+            ),
+            (
+                "probe (b): the space before an edge comment still separates the text from the tag",
+                "export function App() @{\n\t<div className=\"aaaaaaaaaaaaaaaaaaaaaaaa\">xxxxxxxxxxxxxxxxxxxxx yyyyyyyyyyyy /* a */<b>qqqqqqqqqqqqqqqqqqqqqqq</b></div>\n}\n",
+                "export function App() @{\n  <div className=\"aaaaaaaaaaaaaaaaaaaaaaaa\">\n    xxxxxxxxxxxxxxxxxxxxx yyyyyyyyyyyy/* a */ <b>qqqqqqqqqqqqqqqqqqqqqqq</b>\n  </div>;\n}\n",
+            ),
+            (
+                "probe (c): a leading space after the opening tag survives a run on lines of its own",
+                "export function App() @{\n\t<p>/* a */ x\n\ty</p>\n}\n",
+                "export function App() @{\n  <p> /* a */x\n    y\n  </p>;\n}\n",
+            ),
+            (
+                "probe (d): both spaces between braced children and the text survive",
+                "export function App({ a }) @{\n\t<div className=\"aaaaaaaaaaaaaaaaaaaaaaaa\">{a}/* a */ yyyyyyyyyyyy /* b */{a}<b>qqqqqqqqqqqqqqqqqqqqqqq</b></div>\n}\n",
+                "export function App({ a }) @{\n  <div className=\"aaaaaaaaaaaaaaaaaaaaaaaa\">\n    {a} /* a */yyyyyyyyyyyy/* b */ {a}\n    <b>qqqqqqqqqqqqqqqqqqqqqqq</b>\n  </div>;\n}\n",
+            ),
+            (
+                "a long line Oxfmt breaks around an inline marker keeps both spaces on the text's line",
+                "export function App({ a }) @{\n\t<p><b>qqqqqqqqqqqqqqqqqqqq</b><b>qqqqqqqqqqqqqqqqqqqq</b>/* a */ x /* b */<b>qqqqqqqqqqqqqqqqqqqq</b><b>qqqqqqqqqqqqqqqqqqqq</b></p>\n}\n",
+                "export function App({ a }) @{\n  <p>\n    <b>qqqqqqqqqqqqqqqqqqqq</b>\n    <b>qqqqqqqqqqqqqqqqqqqq</b> /* a */x/* b */ <b>qqqqqqqqqqqqqqqqqqqq</b>\n    <b>qqqqqqqqqqqqqqqqqqqq</b>\n  </p>;\n}\n",
+            ),
+            (
+                "two spaces split by comments stay two spaces",
+                "export function App({ a }) @{\n\t<p><b>q</b>/* a */ /* b */ x /* c */ /* d */<i>w</i></p>\n}\n",
+                "export function App({ a }) @{\n  <p>\n    <b>q</b> /* a */ /* b */x /* c *//* d */ <i>w</i>\n  </p>;\n}\n",
+            ),
+            (
+                "a run of only a comment and a space stays between its neighbours",
+                "export function App({ a }) @{\n\t<p>{a}/* a */ {a}</p>\n}\n",
+                "export function App({ a }) @{\n  <p>\n    {a}/* a */ {a}\n  </p>;\n}\n",
+            ),
+        ] {
+            let first = format_text(Path::new("App.tsrx"), source).unwrap();
+            assert_eq!(first.code, expected, "{case}");
+            let second = format_text(Path::new("App.tsrx"), &first.code).unwrap();
+            assert_eq!(second.code, first.code, "{case}: idempotent");
+        }
+    }
+
+    #[test]
     fn sort_imports_orders_a_tsrx_import_chunk_and_converges() {
         let source = concat!(
             "import { z } from \"zebra\";\n",

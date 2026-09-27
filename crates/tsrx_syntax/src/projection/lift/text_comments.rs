@@ -1,19 +1,19 @@
 //! Restoring the JSX text runs the formatter projection held out of Oxfmt because they hold a
 //! comment. `@tsrx/core` 0.5 reads a JavaScript comment in JSX text as a comment, which TSX does
 //! not, so Oxfmt would reflow such a run as plain words and could join a line comment onto the
-//! text after it. Each run comes back as authored, with its continuation lines re-indented to
-//! the line Oxfmt placed its marker on.
+//! text after it. Each run comes back as authored (less any significant edge whitespace the
+//! projection moved out beside the marker), with its continuation lines re-indented to the line
+//! Oxfmt placed its marker on.
 
 use crate::diagnostics::ProjectionError;
 
 use super::{
-    super::format::FormatProjection,
+    super::format::{FormatProjection, RunEdge},
     text::{parse_decimal, skip_ascii_whitespace},
 };
 
 pub(super) fn lift_text_comment_runs(
     source: &str,
-    original_source: &str,
     projection: &FormatProjection,
 ) -> Result<String, ProjectionError> {
     let bytes = source.as_bytes();
@@ -27,8 +27,8 @@ pub(super) fn lift_text_comment_runs(
         let (ordinal, digits_end) =
             parse_decimal(bytes, marker + needle.len()).ok_or(ProjectionError::MarkerResidual)?;
         let index = ordinal as usize;
-        let run =
-            *projection.text_comment_runs.get(index).ok_or(ProjectionError::MarkerResidual)?;
+        let run = projection.text_comment_runs.get(index).ok_or(ProjectionError::MarkerResidual)?;
+        let payload = run.payload.as_str();
         if restored[index] || bytes.get(digits_end..digits_end + 2) != Some(b"__") {
             return Err(ProjectionError::ScaffoldMismatch { index });
         }
@@ -36,11 +36,53 @@ pub(super) fn lift_text_comment_runs(
         if open < copied {
             return Err(ProjectionError::ScaffoldMismatch { index });
         }
-        let payload = original_source
-            .get(run.start as usize..run.end as usize)
-            .ok_or(ProjectionError::StructuralMismatch)?;
         let indent = line_indentation(source, open);
+        // A significant space beside the marker (the projection moves the run's own out there).
+        // Where Oxfmt broke the line at it, it wrote the space as `{" "}` at the line's edge; the
+        // space goes back onto the line of the text it separates, where it was authored.
+        let mut open = open;
+        let mut close = close;
+        let mut joined_leading = false;
+        if run.before == RunEdge::Spaced
+            && let Some(space) = spacer_before(source, open)
+            && let Some(previous) =
+                source[..space].rfind(|character: char| !character.is_ascii_whitespace())
+            && previous + 1 >= copied
+        {
+            open = previous + 1;
+            joined_leading = true;
+        }
+        if run.before == RunEdge::Glued
+            && let Some(previous) =
+                source[..open].rfind(|character: char| !character.is_ascii_whitespace())
+            && previous + 1 >= copied
+            && source[previous + 1..open].contains(['\n', '\r'])
+        {
+            open = previous + 1;
+        }
+        let mut joined_trailing = None;
+        if run.after == RunEdge::Glued {
+            let next = close
+                + source[close..]
+                    .find(|character: char| !character.is_ascii_whitespace())
+                    .unwrap_or(source.len() - close);
+            if source[close..next].contains(['\n', '\r']) && next < source.len() {
+                close = next;
+            }
+        } else if run.after == RunEdge::Spaced && source[close..].starts_with(SPACER) {
+            let after = close + SPACER.len();
+            let next = after
+                + source[after..]
+                    .find(|character: char| !character.is_ascii_whitespace())
+                    .unwrap_or(source.len() - after);
+            if source[after..next].contains(['\n', '\r']) && next < source.len() {
+                joined_trailing = Some(next);
+            }
+        }
         output.push_str(&source[copied..open]);
+        if joined_leading {
+            output.push(' ');
+        }
         // Where Oxfmt put the marker on a line of its own, the run's leading spaces sit next to
         // a line break and are layout.
         let payload = if source[..open].ends_with(indent)
@@ -51,6 +93,10 @@ pub(super) fn lift_text_comment_runs(
             payload
         };
         push_reindented(&mut output, payload, indent);
+        if let Some(next) = joined_trailing {
+            output.push(' ');
+            close = next;
+        }
         // A run that ends in a line comment needs a line break before whatever follows it.
         if ends_in_line_comment(payload)
             && !source[close..].trim_start_matches([' ', '\t']).starts_with(['\n', '\r'])
@@ -68,6 +114,19 @@ pub(super) fn lift_text_comment_runs(
         return Err(ProjectionError::ScaffoldMismatch { index });
     }
     Ok(output)
+}
+
+/// Oxfmt's spelling of a significant JSX space at a line break.
+const SPACER: &str = "{\" \"}";
+
+/// The offset of a `{" "}` that ends the line before the marker at `open`, if one does.
+fn spacer_before(source: &str, open: usize) -> Option<usize> {
+    let gap_start = source[..open]
+        .rfind(|character: char| !character.is_ascii_whitespace())
+        .map_or(0, |index| index + 1);
+    let gap = &source[gap_start..open];
+    (gap.contains(['\n', '\r']) && source[..gap_start].ends_with(SPACER))
+        .then(|| gap_start - SPACER.len())
 }
 
 /// Finds the braces around one marker: `{/*PY0__*/}` inline, or `{// PY0__` and a line break
