@@ -720,7 +720,7 @@ test("strict parsing throws the first returned diagnostic as a SyntaxError-like 
     (error) => {
       assert.equal(error.name, "SyntaxError");
       assert.equal(error.message, "Unexpected token");
-      assert.equal(error.code, undefined);
+      assert.equal(error.code, "TS1012");
       assert.equal(error.pos, 13);
       assert.equal(error.raisedAt, 14);
       assert.equal(error.end, 14);
@@ -785,14 +785,14 @@ test("dynamic-tag reports carry @tsrx/core 0.5's message and code without failin
     (error) =>
       error instanceof SyntaxError &&
       error.message === message &&
-      error.code === "tsrx-dynamic-tag-expression" &&
+      error.code === "TSRX2014" &&
       error.type === "fatal",
   );
   const errors = [];
   assert.equal(api.parseModule(source, "DynamicTagCall.tsrx", { collect: true, errors }), program);
   assert.deepEqual(
     errors.map((error) => [error.message, error.code, error.type, error.pos, error.end]),
-    [[message, "tsrx-dynamic-tag-expression", "usage", 13, 14]],
+    [[message, "TSRX2014", "usage", 13, 14]],
   );
 });
 
@@ -821,7 +821,7 @@ test("a dynamic tag that is no expression throws core's acorn-shaped error in ev
         assert.equal(error.pos, 13);
         assert.deepEqual(error.loc, { line: 1, column: 13 });
         assert.equal(error.end, undefined);
-        assert.equal(error.code, undefined);
+        assert.equal(error.code, "TSRX2014");
         return true;
       },
     );

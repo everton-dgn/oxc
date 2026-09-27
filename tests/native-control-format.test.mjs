@@ -100,7 +100,7 @@ test('rejects malformed dynamic tags and styles without returning partial output
 });
 
 test('formats a dynamic tag expression @tsrx/core only reports', async () => {
-  // Core reports `<{tag()}>` as tsrx-dynamic-tag-expression without failing the parse, and its
+  // Core reports `<{tag()}>` as TSRX2014 without failing the parse, and its
   // formatters still format the file; lint is where the report shows.
   const result = await run(['--stdin-filepath=reported.tsrx'], 'function View() @{ <{tag()} /> }');
   assert.equal(result.code, 0, result.stderr || result.stdout);
