@@ -392,8 +392,29 @@ fn reports_direct_control_roots_as_dynamic_tag_expressions() {
             "@switch(kind){@case 0:{A}@default:{B}}",
         ),
         ("const x=<{@try{A}@pending{B}@catch{C}}/>;", "@try{A}@pending{B}@catch{C}"),
+        // Core reports the root without the whitespace around it.
+        ("const x=<{ @if(ok){Tag}@else{Fallback} }/>;", "@if(ok){Tag}@else{Fallback}"),
     ] {
         assert_eq!(dynamic_tag_reports(source), [needle_span(source, reported)], "{source}");
+    }
+}
+
+#[test]
+fn reports_an_expression_that_starts_or_ends_at_a_nested_dynamic_tag() {
+    // Issue #123 follow-up: the expression's own ends sit on the nested tag's scaffold.
+    for (source, expression, kind) in [
+        ("const x=<{ c || <{T}>x</{T}> }/>;", "c || <{T}>x</{T}>", "LogicalExpression"),
+        ("const x=<{ <{T} /> || c }/>;", "<{T} /> || c", "LogicalExpression"),
+        ("const x=<{<{T} /> || c}>x</{<{T} /> || c}>;", "<{T} /> || c", "LogicalExpression"),
+    ] {
+        assert_eq!(dynamic_tag_reports(source), [needle_span(source, expression)], "{source}");
+        let result = parse_tsrx(&TsrxParseRequest { source }).expect("a Program");
+        let tape = result.program();
+        let (_, name, _) = dynamic_parts(tape, initializer(tape));
+        let logical = object_field(tape, name, "expression");
+        require_type(tape, logical, kind);
+        assert_eq!(span(tape, logical), needle_span(source, expression), "{source}");
+        assert_no_scaffold(tape);
     }
 }
 

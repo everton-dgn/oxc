@@ -147,8 +147,9 @@ fn push_unclosed_tag_diagnostics(
 ///
 /// The part's ends are authored tokens, so each maps back on its own even when the part spans a
 /// nested template the projection rewrote. Should either end sit in generated text, the whole
-/// authored expression stands in for it.
+/// authored expression stands in for it, without the whitespace around it, as core reports it.
 fn push_invalid_dynamic_tag_diagnostics(
+    source: &str,
     errors: &mut DiagnosticTable,
     invalid: &[InvalidDynamicTag],
     segments: &[tsrx_syntax::ProjectionSegment],
@@ -163,7 +164,15 @@ fn push_invalid_dynamic_tag_diagnostics(
         let end = projection::map_endpoint(segments, tag.end, false);
         let span = match (start, end) {
             (Some(start), Some(end)) if start <= end => TapeSpan::new(start, end),
-            _ => TapeSpan::new(expression.start, expression.end),
+            _ => {
+                let text = &source[expression.start as usize..expression.end as usize];
+                let width = |text: &str| {
+                    u32::try_from(text.len())
+                        .map_err(|_| TsrxParseError::Unsupported("source above 4 GiB"))
+                };
+                let start = expression.start + width(text)? - width(text.trim_start())?;
+                TapeSpan::new(start, start + width(text.trim())?)
+            }
         };
         let labels = errors.append_labels([(span, None, true)])?;
         errors.push_diagnostic(
@@ -391,6 +400,7 @@ fn parse_projected<W: Utf16WorkObserver>(
         options.recovery == TsrxParseRecovery::Editor,
     )?;
     push_invalid_dynamic_tag_diagnostics(
+        source,
         &mut errors,
         &invalid_dynamic_tags,
         projection_view.segments,

@@ -542,12 +542,15 @@ impl<'a> Builder<'a> {
                     return Err(ProjectionError::StructuralMismatch);
                 }
                 self.copy_to(tag.opening.start as usize)?;
-                write!(
-                    self.output,
-                    "<{}D{} {}A{}_={{(",
-                    self.prefix, token.owner, self.prefix, token.owner
-                )
-                .expect("writing to a String cannot fail");
+                // Anchored, like the `))}</…>` below, so an expression that starts or ends at a
+                // tag nested in another tag's expression still has authored ends.
+                self.push_anchored(
+                    &format!(
+                        "<{}D{} {}A{}_={{(",
+                        self.prefix, token.owner, self.prefix, token.owner
+                    ),
+                    tag.opening.start,
+                )?;
                 self.cursor = tag.expression.start as usize;
             }
             ParserDynamicKind::OpenEnd => {
@@ -588,8 +591,10 @@ impl<'a> Builder<'a> {
                     return Err(ProjectionError::StructuralMismatch);
                 }
                 self.copy_to(tag.closing_expression.end as usize)?;
-                write!(self.output, "))}}</{}D{}>", self.prefix, token.owner)
-                    .expect("writing to a String cannot fail");
+                self.push_anchored(
+                    &format!("))}}</{}D{}>", self.prefix, token.owner),
+                    tag.closing.end,
+                )?;
                 self.cursor = tag.closing.end as usize;
             }
         }

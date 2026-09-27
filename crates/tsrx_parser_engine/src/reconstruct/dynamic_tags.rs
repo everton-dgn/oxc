@@ -359,11 +359,12 @@ fn require_expression_within(
     authored: ByteSpan,
     segments: &[ProjectionSegment],
 ) -> Result<(), TsrxParseError> {
-    let start = map_endpoint(segments, scalar_u32(tape, expression, "start")?, true).ok_or(
-        TsrxParseError::Unsupported("dynamic expression start is outside authored source"),
-    )?;
-    let end = map_endpoint(segments, scalar_u32(tape, expression, "end")?, false)
-        .ok_or(TsrxParseError::Unsupported("dynamic expression end is outside authored source"))?;
+    // An end at a tag nested in the expression sits in that tag's generated scaffold, which the
+    // container holds, so only an authored end is checked.
+    let start = map_endpoint(segments, scalar_u32(tape, expression, "start")?, true)
+        .unwrap_or(authored.start);
+    let end =
+        map_endpoint(segments, scalar_u32(tape, expression, "end")?, false).unwrap_or(authored.end);
     if authored.start <= start && start < end && end <= authored.end {
         Ok(())
     } else {
