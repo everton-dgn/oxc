@@ -26,6 +26,9 @@ pub(super) struct Checkpoint {
     pub(super) script_blocks: usize,
     pub(super) statement_boundaries: usize,
     pub(super) markup_statements: usize,
+    pub(super) jsx_text_comments: usize,
+    pub(super) jsx_text_comment_runs: usize,
+    pub(super) implicit_closes: usize,
     pub(super) first_root: u32,
     pub(super) last_root: u32,
     parent: Option<(usize, u32, u32)>,
@@ -49,6 +52,9 @@ impl Scanner<'_> {
             style_blocks: self.style_blocks,
             script_blocks: self.script_blocks,
             statement_boundaries: self.statement_boundaries,
+            jsx_text_comments: self.jsx_text_comments,
+            jsx_text_comment_runs: self.jsx_text_comment_runs,
+            implicit_closes: self.implicit_closes,
             first_root: self.first_root,
             last_root: self.last_root,
         }
@@ -173,6 +179,9 @@ impl Scanner<'_> {
             script_blocks: self.script_blocks.len(),
             statement_boundaries: self.statement_boundaries.len(),
             markup_statements: self.markup_statements.len(),
+            jsx_text_comments: self.jsx_text_comments.len(),
+            jsx_text_comment_runs: self.jsx_text_comment_runs.len(),
+            implicit_closes: self.implicit_closes.len(),
             first_root: self.first_root,
             last_root: self.last_root,
             parent,
@@ -197,6 +206,9 @@ impl Scanner<'_> {
         self.script_blocks.truncate(checkpoint.script_blocks);
         self.statement_boundaries.truncate(checkpoint.statement_boundaries);
         self.markup_statements.truncate(checkpoint.markup_statements);
+        self.jsx_text_comments.truncate(checkpoint.jsx_text_comments);
+        self.jsx_text_comment_runs.truncate(checkpoint.jsx_text_comment_runs);
+        self.implicit_closes.truncate(checkpoint.implicit_closes);
         if let Some(probes) = self.surrogate_probes.as_deref() {
             probes.borrow_mut().rollback(checkpoint.probe_changes);
         }

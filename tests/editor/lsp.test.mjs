@@ -149,6 +149,77 @@ test("native LSP activates TSRX formatting, live diagnostics, edits, and safe ac
   }
 });
 
+// `@tsrx/core` reports a dynamic tag expression that isn't an allowed form, and a
+// `</script` a script body keeps as text, without failing the parse, and its
+// editor tooling underlines both as errors. The editor here must too: at core's
+// spans, with core's codes, while the file's own rules still report and the file
+// still formats.
+test("native LSP underlines what @tsrx/core reports without failing the file", async () => {
+  const path = join(workspace, "CoreReports.tsrx");
+  const reportsUri = pathToFileUri(path);
+  const source =
+    "export function View(props) @{\n" +
+    "  var total = 0;\n" +
+    "  <{getTag()} />\n" +
+    "  <{props.open ? A : B}>{total}</{props.open ? A : B}>\n" +
+    "  <head><script>a = 1;</SCRIPT>b = 2;</script></head>\n" +
+    "}\n";
+  const client = new LspClient(server, { args: SERVER_ARGUMENTS, cwd: workspace });
+  try {
+    await client.initialize(pathToFileUri(workspace));
+    client.notify("textDocument/didOpen", {
+      textDocument: { uri: reportsUri, languageId: "markless-tsrx", version: 1, text: source },
+    });
+    const published = await client.waitFor(
+      (message) =>
+        message.method === "textDocument/publishDiagnostics" &&
+        message.params.uri === reportsUri,
+      5000,
+      "core report diagnostics",
+    );
+    const rangeOf = (text) => {
+      const start = source.indexOf(text);
+      return {
+        start: editorPositionOf(source, start),
+        end: editorPositionOf(source, start + text.length),
+      };
+    };
+    const reports = published.params.diagnostics
+      .filter((diagnostic) => diagnostic.code.startsWith("tsrx-"))
+      .map(({ code, severity, range }) => ({ code, severity, range }))
+      .sort((left, right) => left.range.start.line - right.range.start.line);
+    assert.deepEqual(reports, [
+      { code: "tsrx-dynamic-tag-expression", severity: 1, range: rangeOf("getTag()") },
+      { code: "tsrx-dynamic-tag-expression", severity: 1, range: rangeOf("props.open ? A : B") },
+      { code: "tsrx-script-end-tag-in-body", severity: 1, range: rangeOf("</SCRIPT") },
+    ]);
+    const script = published.params.diagnostics.find(
+      (diagnostic) => diagnostic.code === "tsrx-script-end-tag-in-body",
+    );
+    assert.equal(
+      script.message,
+      "'</SCRIPT' can end a script in HTML, so a '<script>' body can't contain it. Write '<\\/SCRIPT' instead.",
+    );
+    assert.ok(
+      published.params.diagnostics.some((diagnostic) => diagnostic.code === "no-var"),
+      "the file's own rules still report",
+    );
+
+    const formatting = await client.request("textDocument/formatting", {
+      textDocument: { uri: reportsUri },
+      options: { tabSize: 2, insertSpaces: true },
+    });
+    const formatted = applyTextEdits(source, formatting ?? []);
+    assert.match(formatted, /<\{getTag\(\)\} \/>/);
+    assert.match(formatted, /<\/SCRIPT>b = 2;/);
+
+    client.notify("textDocument/didClose", { textDocument: { uri: reportsUri } });
+    await client.close();
+  } finally {
+    client.terminate();
+  }
+});
+
 // A `jsPlugins` config used to take every diagnostic away from every `.tsrx` file
 // in the editor, silently. The command line strips `jsPlugins` before it reaches
 // the native engine, because the `oxlint` wrapper hosts those plugins itself over

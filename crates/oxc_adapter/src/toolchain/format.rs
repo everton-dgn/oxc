@@ -18,7 +18,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::timings::{FormatEngineTimings, elapsed_ns};
-use crate::{DynamicTagContract, DynamicTagError, SourceKind, validate_dynamic_tags};
+use crate::{DynamicTagContract, DynamicTagError, SourceKind, find_invalid_dynamic_tags};
 
 /// Why one canonical Oxfmt formatting pass produced no output.
 #[derive(Debug)]
@@ -431,7 +431,9 @@ pub fn format(request: &FormatRequest<'_>) -> Result<EngineFormatResult, FormatE
             parsed.diagnostics.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ");
         return Err(FormatError::Parse { detail });
     }
-    validate_dynamic_tags(&parsed.program, request.dynamic_tags)?;
+    // `@tsrx/core` formatters format a file whose dynamic tag expressions it only reports, so
+    // only a broken scaffold contract stops formatting; the lint lane reports the expressions.
+    find_invalid_dynamic_tags(&parsed.program, request.dynamic_tags)?;
     let parse_ns = elapsed_ns(started);
 
     let started = Instant::now();
@@ -814,7 +816,9 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_tag_validator_rejects_authoritative_disallowed_ast_shapes() {
+    fn dynamic_tag_validator_formats_expressions_core_only_reports() {
+        // `@tsrx/core` reports these without failing the parse, and its formatters still format
+        // the file, so the scaffold validator must accept them.
         for expression in [
             "/x/",
             "null as any",
@@ -832,9 +836,7 @@ mod tests {
             "fn<string>()",
             "key in [Tag]",
         ] {
-            let error = format_dynamic(expression).unwrap_err().to_string();
-            assert!(error.contains("dynamic tag"), "{expression}: {error}");
-            assert!(error.contains("source byte 0"), "{expression}: {error}");
+            assert!(format_dynamic(expression).is_ok(), "{expression}");
         }
     }
 

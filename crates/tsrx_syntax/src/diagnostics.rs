@@ -3,35 +3,66 @@ use std::{error::Error, fmt};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProjectionError {
     SourceTooLarge,
-    SourceChanged { offset: u32 },
-    UnsupportedSyntax { offset: u32, construct: &'static str },
-    UnterminatedSyntax { offset: u32, construct: &'static str },
-    MalformedSyntax { offset: u32, expected: &'static str },
+    SourceChanged {
+        offset: u32,
+    },
+    UnsupportedSyntax {
+        offset: u32,
+        construct: &'static str,
+    },
+    UnterminatedSyntax {
+        offset: u32,
+        construct: &'static str,
+    },
+    MalformedSyntax {
+        offset: u32,
+        expected: &'static str,
+    },
+    /// A JSX element still open where its template or source ends, because a JavaScript comment
+    /// in its text swallowed the closing tag. `name` is the authored tag name, empty for a
+    /// fragment. The message is `@tsrx/core`'s.
+    UnclosedTag {
+        offset: u32,
+        name: String,
+    },
     MarkerSpaceExhausted,
-    MarkerMissing { index: usize },
-    MarkerDuplicated { index: usize },
-    MarkerReordered { index: usize },
-    MarkerTargetChanged { index: usize, expected: &'static str },
+    MarkerMissing {
+        index: usize,
+    },
+    MarkerDuplicated {
+        index: usize,
+    },
+    MarkerReordered {
+        index: usize,
+    },
+    MarkerTargetChanged {
+        index: usize,
+        expected: &'static str,
+    },
     MarkerResidual,
-    ScaffoldMismatch { index: usize },
+    ScaffoldMismatch {
+        index: usize,
+    },
     StructuralMismatch,
 }
 
 impl ProjectionError {
     /// The authored-source UTF-8 byte offset this failure points at, when it has one.
     ///
-    /// Four variants carry an offset; the other nine describe a whole-source or marker-level
+    /// Five variants carry an offset; the other nine describe a whole-source or marker-level
     /// failure with no position. Every offset is an index into the `&str` handed to [`crate::scan`]
     /// and is taken at a token start, so it always lands on a character boundary. This accessor
     /// exists so a caller that needs the position never has to re-parse the [`fmt::Display`] text,
-    /// which embeds the offset in three different places across the four templates.
+    /// which embeds the offset in three different places across four templates and leaves it out
+    /// of `@tsrx/core`'s `UnclosedTag` message.
     #[must_use]
     pub const fn byte_offset(&self) -> Option<u32> {
         match self {
             Self::SourceChanged { offset }
             | Self::UnsupportedSyntax { offset, .. }
             | Self::UnterminatedSyntax { offset, .. }
-            | Self::MalformedSyntax { offset, .. } => Some(*offset),
+            | Self::MalformedSyntax { offset, .. }
+            | Self::UnclosedTag { offset, .. } => Some(*offset),
             Self::SourceTooLarge
             | Self::MarkerSpaceExhausted
             | Self::MarkerMissing { .. }
@@ -60,6 +91,9 @@ impl fmt::Display for ProjectionError {
             }
             Self::MalformedSyntax { offset, expected } => {
                 write!(formatter, "malformed TSRX at byte {offset}: expected {expected}")
+            }
+            Self::UnclosedTag { name, .. } => {
+                formatter.write_str(&crate::model::unclosed_tag_message(name))
             }
             Self::MarkerSpaceExhausted => {
                 formatter.write_str("unable to create a collision-free TSRX marker namespace")

@@ -204,41 +204,98 @@ fn preserves_authored_attributes_and_children_around_dynamic_scaffolding() {
     assert_no_scaffold(tape);
 }
 
+/// `@tsrx/core`'s message for a dynamic tag expression that isn't an allowed form.
+const DYNAMIC_TAG_EXPRESSION: &str = "A dynamic tag expression must be an identifier, a member access such as `props.as` or `registry[name]`, or a string literal. Compute anything else before the element: `const Tag = c ? Child : Fallback;`, then `<{Tag} />`.";
+
+/// Parses a source that must keep its Program and returns the authored span of every dynamic tag
+/// report, in table order.
+fn dynamic_tag_reports(source: &str) -> Vec<(u32, u32)> {
+    let result = parse_tsrx(&TsrxParseRequest { source })
+        .unwrap_or_else(|error| panic!("`{source}` escaped as an operational error: {error}"));
+    assert!(result.program.is_some(), "`{source}` lost its Program");
+    result
+        .errors
+        .records()
+        .iter()
+        .filter(|record| result.errors.string(record.message) == Some(DYNAMIC_TAG_EXPRESSION))
+        .map(|record| {
+            assert_eq!(record.phase, tsrx_tape_schema::DiagnosticPhase::Grammar);
+            let labels = result.errors.labels(record.labels).expect("labels");
+            assert_eq!(labels.len(), 1, "{source}");
+            (labels[0].span.start, labels[0].span.end)
+        })
+        .collect()
+}
+
+/// The span of the first `needle` in `source`.
+fn needle_span(source: &str, needle: &str) -> (u32, u32) {
+    let start = source.find(needle).unwrap_or_else(|| panic!("`{needle}` in `{source}`"));
+    let start = u32::try_from(start).expect("fixture offset");
+    (start, start + u32::try_from(needle.len()).expect("fixture length"))
+}
+
 #[test]
-fn accepts_the_complete_dynamic_expression_family_and_unwraps_outer_parens() {
+fn accepts_identifiers_member_chains_and_string_literals_without_a_report() {
     for (expression, kind) in [
         ("tag", "Identifier"),
         ("obj.new", "MemberExpression"),
         ("obj.Tag", "MemberExpression"),
         ("obj[key]", "MemberExpression"),
-        ("obj?.Tag", "ChainExpression"),
-        ("obj?.[key]", "ChainExpression"),
-        ("(obj)[key]", "MemberExpression"),
-        ("obj![key]", "MemberExpression"),
-        ("ok ? A : B", "ConditionalExpression"),
+        ("this.tag", "MemberExpression"),
+        ("items[0]", "MemberExpression"),
+        ("registry['k']", "MemberExpression"),
+        ("a.b[c.d][0].e", "MemberExpression"),
         (r#""div""#, "Literal"),
-        ("`div`", "TemplateLiteral"),
-        ("-1", "UnaryExpression"),
-        ("x = Tag", "AssignmentExpression"),
-        ("x += Tag", "AssignmentExpression"),
-        ("x++", "UpdateExpression"),
-        ("++x", "UpdateExpression"),
-        ("() => Tag", "ArrowFunctionExpression"),
-        ("tag as any", "TSAsExpression"),
-        ("a, b", "SequenceExpression"),
     ] {
         let source = format!("const x=<{{{expression}}}/>;");
-        let result = parse_tsrx(&TsrxParseRequest { source: &source })
-            .unwrap_or_else(|error| panic!("allowed `{expression}` failed: {error}"));
+        assert_eq!(dynamic_tag_reports(&source), [], "{expression}");
+        let result = parse_tsrx(&TsrxParseRequest { source: &source }).expect("allowed form");
         let tape = result.program();
-        let element = initializer(tape);
-        let (_, name, _) = dynamic_parts(tape, element);
-        let expression = object_field(tape, name, "expression");
-        require_type(tape, expression, kind);
+        let (_, name, _) = dynamic_parts(tape, initializer(tape));
+        require_type(tape, object_field(tape, name, "expression"), kind);
+        assert_no_scaffold(tape);
+    }
+}
+
+#[test]
+fn keeps_every_other_expression_and_reports_it_at_the_part_core_reports() {
+    // Each shape keeps its Program and its exact node; the report lands where `@tsrx/core`'s
+    // `find_invalid_dynamic_tag_part` puts it: the whole tag, or the first disallowed object or
+    // computed key of a member chain, parentheses included.
+    for (expression, kind, reported) in [
+        ("obj?.Tag", "ChainExpression", "obj?.Tag"),
+        ("obj?.[key]", "ChainExpression", "obj?.[key]"),
+        ("(obj)[key]", "MemberExpression", "(obj)"),
+        ("( /* c */ obj )[key]", "MemberExpression", "( /* c */ obj )"),
+        ("obj![key]", "MemberExpression", "obj!"),
+        ("(this).tag", "MemberExpression", "(this)"),
+        ("registry[getName()]", "MemberExpression", "getName()"),
+        ("registry[(name)]", "MemberExpression", "(name)"),
+        ("a.b[c[d()]]", "MemberExpression", "d()"),
+        ("undefined.tag", "MemberExpression", "undefined"),
+        ("ok ? A : B", "ConditionalExpression", "ok ? A : B"),
+        ("`div`", "TemplateLiteral", "`div`"),
+        ("-1", "UnaryExpression", "-1"),
+        ("x = Tag", "AssignmentExpression", "x = Tag"),
+        ("x += Tag", "AssignmentExpression", "x += Tag"),
+        ("x++", "UpdateExpression", "x++"),
+        ("++x", "UpdateExpression", "++x"),
+        ("() => Tag", "ArrowFunctionExpression", "() => Tag"),
+        ("tag as any", "TSAsExpression", "tag as any"),
+        ("tag satisfies T", "TSSatisfiesExpression", "tag satisfies T"),
+        ("a, b", "SequenceExpression", "a, b"),
+    ] {
+        let source = format!("const x=<{{{expression}}}/>;");
+        assert_eq!(dynamic_tag_reports(&source), [needle_span(&source, reported)], "{expression}");
+        let result = parse_tsrx(&TsrxParseRequest { source: &source }).expect("reported form");
+        let tape = result.program();
+        let (_, name, _) = dynamic_parts(tape, initializer(tape));
+        require_type(tape, object_field(tape, name, "expression"), kind);
         assert_no_scaffold(tape);
     }
 
     let source = "const x=<{((tag))}/>;";
+    assert_eq!(dynamic_tag_reports(source), [needle_span(source, "((tag))")]);
     let result = parse_tsrx(&TsrxParseRequest { source }).expect("outer parens");
     let tape = result.program();
     let (_, name, _) = dynamic_parts(tape, initializer(tape));
@@ -275,7 +332,7 @@ fn preserves_distinct_equivalent_closing_spelling_and_closing_whitespace() {
 }
 
 #[test]
-fn recursively_rejects_disallowed_dynamic_expression_shapes() {
+fn reports_calls_construction_literals_and_operators_without_failing_the_parse() {
     for expression in [
         "tag()",
         "ok ? tag() : Tag",
@@ -286,6 +343,8 @@ fn recursively_rejects_disallowed_dynamic_expression_shapes() {
         "`a${tag}`",
         "tag`x`",
         "null as any",
+        "null",
+        "true",
         "/x/",
         "undefined",
         "undefined as any",
@@ -294,22 +353,47 @@ fn recursively_rejects_disallowed_dynamic_expression_shapes() {
         "fn!()",
         "fn<string>()",
         "key in [Tag]",
-        r"ok ? \u005ft0_W0_(Tag) : Fallback",
+        "<b>x</b>",
+        "<>x</>",
+        "c || <b>x</b>",
+        r"ok ? _t0_W0_(Tag) : Fallback",
     ] {
         let source = format!("const x=<{{{expression}}}/>;");
-        assert_failed(&source);
+        let reported = match expression {
+            "({tag}).tag" => "({tag})",
+            "[Tag][0]" => "[Tag]",
+            expression => expression,
+        };
+        assert_eq!(dynamic_tag_reports(&source), [needle_span(&source, reported)], "{expression}");
     }
 }
 
 #[test]
-fn direct_control_roots_fail_closed_as_dynamic_tag_names() {
-    for source in [
-        "const x=<{@if(ok){Tag}@else{Fallback}}/>;",
-        "const x=<{@for(item of items){item.Tag}@empty{Fallback}}/>;",
-        "const x=<{@switch(kind){@case 0:{A}@default:{B}}}/>;",
-        "const x=<{@try{A}@pending{B}@catch{C}}/>;",
+fn reports_a_paired_element_once_at_its_opening_tag() {
+    let source = "const x=<{ok ? A : B}>x</{ok ? A : B}>;";
+    assert_eq!(dynamic_tag_reports(source), [(10, 20)]);
+
+    // A nested dynamic tag is its own element and is checked on its own. As in `@tsrx/core`, one
+    // nested in the opening name reports before its parent, and one in the closing name after.
+    let source = "const x=<{() => <{a()}/>}>x</{() => <{a()}/>}>;";
+    assert_eq!(dynamic_tag_reports(source), [(18, 21), (10, 24), (38, 41)]);
+}
+
+#[test]
+fn reports_direct_control_roots_as_dynamic_tag_expressions() {
+    for (source, reported) in [
+        ("const x=<{@if(ok){Tag}@else{Fallback}}/>;", "@if(ok){Tag}@else{Fallback}"),
+        (
+            "const x=<{@for(item of items){item.Tag}@empty{Fallback}}/>;",
+            "@for(item of items){item.Tag}@empty{Fallback}",
+        ),
+        (
+            "const x=<{@switch(kind){@case 0:{A}@default:{B}}}/>;",
+            "@switch(kind){@case 0:{A}@default:{B}}",
+        ),
+        ("const x=<{@try{A}@pending{B}@catch{C}}/>;", "@try{A}@pending{B}@catch{C}"),
     ] {
-        assert_failed(source);
+        assert_eq!(dynamic_tag_reports(source), [needle_span(source, reported)], "{source}");
     }
 }
 

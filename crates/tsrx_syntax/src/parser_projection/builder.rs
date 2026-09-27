@@ -3,7 +3,7 @@
 
 use std::fmt::Write as _;
 
-use super::mapping::MappedProjection;
+use super::mapping::{ImplicitCloser, MappedProjection};
 use crate::{
     diagnostics::{ProjectionError, to_u32},
     model::{
@@ -22,6 +22,11 @@ pub(super) struct Builder<'a> {
     segments: Vec<ProjectionSegment>,
     cursor: usize,
     synthetic_callee_spans: Vec<(u32, u32)>,
+    /// Next unwritten entry of `overlay.jsx_text_comments`.
+    text_comment: usize,
+    /// Next unwritten entry of `overlay.implicit_closes`.
+    implicit_close: usize,
+    implicit_closers: Vec<ImplicitCloser>,
 }
 impl<'a> Builder<'a> {
     pub(super) fn new(source: &'a str, overlay: &'a Overlay, prefix: &'a str) -> Self {
@@ -52,11 +57,19 @@ impl<'a> Builder<'a> {
             ),
             cursor: 0,
             synthetic_callee_spans: Vec::new(),
+            text_comment: 0,
+            implicit_close: 0,
+            implicit_closers: Vec::new(),
         }
     }
 
     pub(super) fn finish(mut self) -> Result<MappedProjection, ProjectionError> {
         self.copy_to(self.source.len())?;
+        if self.text_comment != self.overlay.jsx_text_comments.len()
+            || self.implicit_close != self.overlay.implicit_closes.len()
+        {
+            return Err(ProjectionError::StructuralMismatch);
+        }
         Ok(MappedProjection {
             projected: self.output,
             segments: self.segments,
@@ -65,6 +78,7 @@ impl<'a> Builder<'a> {
             dynamic_offsets: Vec::new(),
             synthetic_generator_spans: Vec::new(),
             synthetic_callee_spans: self.synthetic_callee_spans,
+            implicit_closers: self.implicit_closers,
         })
     }
 
@@ -87,9 +101,107 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
+    /// Copies an authored span. A JavaScript comment in JSX text inside it is written as
+    /// whitespace of the same length and line breaks, so OXC reads the text around it as one run
+    /// without the comment, and a closing tag a comment swallowed is written before the `}` that
+    /// ends its element.
+    fn copy_original(&mut self, span: ByteSpan) -> Result<(), ProjectionError> {
+        let comments = &self.overlay.jsx_text_comments;
+        let closes = &self.overlay.implicit_closes;
+        if self.text_comment == comments.len() && self.implicit_close == closes.len() {
+            return self.copy_verbatim(span);
+        }
+        let mut start = span.start;
+        loop {
+            self.write_implicit_closes(start)?;
+            let comment = self.overlay.jsx_text_comments.get(self.text_comment).copied();
+            if let Some(comment) = comment
+                && comment.start < start
+            {
+                return Err(ProjectionError::StructuralMismatch);
+            }
+            let comment = comment.filter(|comment| comment.start < span.end);
+            let close = self
+                .overlay
+                .implicit_closes
+                .get(self.implicit_close)
+                .map(|close| close.offset)
+                .filter(|offset| *offset < span.end);
+            let stop = [comment.map(|comment| comment.start), close]
+                .into_iter()
+                .flatten()
+                .fold(span.end, u32::min);
+            self.copy_verbatim(ByteSpan::new(start, stop))?;
+            start = stop;
+            if let Some(comment) = comment
+                && comment.start == stop
+            {
+                if comment.end > span.end {
+                    return Err(ProjectionError::StructuralMismatch);
+                }
+                self.blank_text_comment(comment)?;
+                self.text_comment += 1;
+                start = comment.end;
+                continue;
+            }
+            if stop == span.end {
+                break;
+            }
+        }
+        self.write_implicit_closes(span.end)
+    }
+
+    /// Writes the closing tags of the elements a `}` at `offset` ends, innermost first, once the
+    /// projection reaches the `}`.
+    fn write_implicit_closes(&mut self, offset: u32) -> Result<(), ProjectionError> {
+        while let Some(close) = self.overlay.implicit_closes.get(self.implicit_close).copied() {
+            if close.offset > offset {
+                break;
+            }
+            if close.offset < offset || self.source.as_bytes().get(offset as usize) != Some(&b'}') {
+                return Err(ProjectionError::StructuralMismatch);
+            }
+            let name = self
+                .source
+                .get(close.name.start as usize..close.name.end as usize)
+                .ok_or(ProjectionError::SourceChanged { offset: close.name.start })?;
+            let projected_start = to_u32(self.output.len())?;
+            write!(self.output, "</{name}>").expect("writing to a String cannot fail");
+            self.implicit_closers.push(ImplicitCloser {
+                projected: ByteSpan::new(projected_start, to_u32(self.output.len())?),
+                original: close.offset,
+            });
+            self.implicit_close += 1;
+        }
+        Ok(())
+    }
+
+    /// Writes one comment in JSX text as spaces, keeping its line breaks, and records it as a
+    /// non-fixable segment: offsets inside it still map back, but no fix may land in it.
+    fn blank_text_comment(&mut self, comment: ByteSpan) -> Result<(), ProjectionError> {
+        let Some(value) = self.source.get(comment.start as usize..comment.end as usize) else {
+            return Err(ProjectionError::SourceChanged { offset: comment.start });
+        };
+        let projected_start = to_u32(self.output.len())?;
+        self.output.extend(
+            value
+                .bytes()
+                .map(|byte| if matches!(byte, b'\n' | b'\r') { byte as char } else { ' ' }),
+        );
+        self.segments.push(ProjectionSegment {
+            projected: ByteSpan::new(projected_start, to_u32(self.output.len())?),
+            original_start: comment.start,
+            fixable: false,
+        });
+        Ok(())
+    }
+
     /// Copies an authored span and records it as a fixable segment. Every span this lane copies
     /// verbatim survives a round trip, so the parser can map a fix range back onto any of them.
-    fn copy_original(&mut self, span: ByteSpan) -> Result<(), ProjectionError> {
+    fn copy_verbatim(&mut self, span: ByteSpan) -> Result<(), ProjectionError> {
+        if span.is_empty() {
+            return Ok(());
+        }
         let start = span.start as usize;
         let end = span.end as usize;
         let Some(value) = self.source.get(start..end) else {
@@ -99,6 +211,7 @@ impl<'a> Builder<'a> {
         self.output.push_str(value);
         let projected_end = to_u32(self.output.len())?;
         if let Some(previous) = self.segments.last_mut()
+            && previous.fixable
             && previous.projected.end == projected_start
             && previous.original_start + (previous.projected.end - previous.projected.start)
                 == span.start

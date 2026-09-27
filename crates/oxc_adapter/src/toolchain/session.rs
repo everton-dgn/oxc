@@ -19,7 +19,9 @@ use oxc_semantic::SemanticBuilder;
 use rustc_hash::FxHashMap;
 
 use super::config::ConfigError;
-use super::diagnostics::{EngineDiagnostic, map_message, map_oxc_diagnostic};
+use super::diagnostics::{
+    EngineDiagnostic, invalid_dynamic_tag_diagnostic, map_message, map_oxc_diagnostic,
+};
 use super::engine::{LintEngine, LintEngineOptions};
 use super::timings::{EngineTimings, elapsed_ns};
 use super::tsgolint::{
@@ -27,7 +29,7 @@ use super::tsgolint::{
     verify_tsgolint_version,
 };
 use super::{RuleFilter, RuleSeverity};
-use crate::{DynamicTagContract, DynamicTagError, SourceKind, validate_dynamic_tags};
+use crate::{DynamicTagContract, DynamicTagError, SourceKind, find_invalid_dynamic_tags};
 
 /// Why one syntax-lane lint pass produced no diagnostics.
 #[derive(Debug)]
@@ -225,7 +227,10 @@ impl LintEngine {
             let diagnostics = parsed.diagnostics.iter().map(map_oxc_diagnostic).collect();
             return Err(LintError::Parse { detail, diagnostics });
         }
-        validate_dynamic_tags(&parsed.program, request.dynamic_tags)?;
+        // A dynamic tag expression `@tsrx/core` reports doesn't stop the lint: it is reported as
+        // an error next to the rules' own diagnostics, and only a broken scaffold contract fails.
+        let invalid_dynamic_tags =
+            find_invalid_dynamic_tags(&parsed.program, request.dynamic_tags)?;
         let parse_ns = elapsed_ns(started);
 
         // AST spans address the legal TSX projection. Expanded framework projections are mapped back
@@ -268,7 +273,11 @@ impl LintEngine {
         };
         let lint_ns = elapsed_ns(started);
 
-        let diagnostics = messages.iter().map(map_message).collect();
+        let diagnostics = invalid_dynamic_tags
+            .iter()
+            .map(invalid_dynamic_tag_diagnostic)
+            .chain(messages.iter().map(map_message))
+            .collect();
 
         Ok(LintResult {
             diagnostics,

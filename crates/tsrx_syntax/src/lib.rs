@@ -8,16 +8,19 @@ mod parser_scanner;
 mod projection;
 mod projection_view;
 mod scanner;
+mod script_end_tags;
 
 pub use diagnostics::ProjectionError;
 pub use model::{
-    ByteSpan, ClauseRole, ControlContext, ControlKind, EmbeddedKind, ForHeader, NONE_INDEX,
-    Overlay, OverlayClause, OverlayDynamicTag, OverlayEmbedded, OverlayNode, OverlayStyleBlock,
-    OverlayToken, OverlayView, PARSER_EXPRESSION_CODE_BLOCK_PREFIX, ParserCodeBlock,
-    ParserCodeBlockKind, ParserDynamicKind, ParserDynamicToken, ParserShorthandAttribute,
-    ScriptBlock, StructuralKind, StructuralToken,
+    ByteSpan, ClauseRole, ControlContext, ControlKind, EmbeddedKind, ForHeader, ImplicitClose,
+    NONE_INDEX, Overlay, OverlayClause, OverlayDynamicTag, OverlayEmbedded, OverlayNode,
+    OverlayStyleBlock, OverlayToken, OverlayView, PARSER_EXPRESSION_CODE_BLOCK_PREFIX,
+    ParserCodeBlock, ParserCodeBlockKind, ParserDynamicKind, ParserDynamicToken,
+    ParserShorthandAttribute, ScriptBlock, StructuralKind, StructuralToken, unclosed_tag_message,
 };
-pub use parser_projection::{MappedProjection as ParserProjection, project_for_parser};
+pub use parser_projection::{
+    ImplicitCloser, MappedProjection as ParserProjection, project_for_parser,
+};
 pub use parser_recovery::{PARSER_RECOVERY_DIAGNOSTIC, ParserRecovery, recover_for_parser};
 pub use parser_scanner::OpaqueSurrogateContext;
 pub use projection::{
@@ -25,6 +28,9 @@ pub use projection::{
     project_for_format, project_for_lint, project_for_types,
 };
 pub use projection_view::{ProjectionSegment, ProjectionView};
+pub use script_end_tags::{
+    SCRIPT_END_TAG_IN_BODY_CODE, ScriptEndTagInBody, script_end_tags_in_body,
+};
 
 use scanner::Scanner;
 

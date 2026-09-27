@@ -6,7 +6,7 @@ use std::cell::RefCell;
 use crate::{
     diagnostics::{ProjectionError, to_u32},
     model::{
-        ByteSpan, Clause, DynamicTag, EmbeddedToken, NONE, Overlay, ParserCodeBlock,
+        ByteSpan, Clause, DynamicTag, EmbeddedToken, ImplicitClose, NONE, Overlay, ParserCodeBlock,
         ParserDynamicToken, ParserShorthandAttribute, ScriptBlock, StructuralToken, StyleBlock,
         SyntaxNode,
     },
@@ -36,6 +36,10 @@ pub(crate) struct Scanner<'a> {
     /// each opening is pushed before its element is scanned. The formatter lift consults this
     /// list before dropping an ASI guard Oxfmt printed in front of one.
     pub(super) markup_statements: Vec<u32>,
+    /// JavaScript comments in JSX text, in source order; see [`Overlay`].
+    pub(super) jsx_text_comments: Vec<ByteSpan>,
+    pub(super) jsx_text_comment_runs: Vec<ByteSpan>,
+    pub(super) implicit_closes: Vec<ImplicitClose>,
     pub(super) first_root: u32,
     pub(super) last_root: u32,
     pub(super) parents: Vec<u32>,
@@ -61,6 +65,9 @@ impl<'a> Scanner<'a> {
             script_blocks: Vec::new(),
             statement_boundaries: Vec::new(),
             markup_statements: Vec::new(),
+            jsx_text_comments: Vec::new(),
+            jsx_text_comment_runs: Vec::new(),
+            implicit_closes: Vec::new(),
             first_root: NONE,
             last_root: NONE,
             parents: Vec::with_capacity(8),

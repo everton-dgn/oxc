@@ -216,6 +216,37 @@ pub struct ScriptBlock {
     pub content: ByteSpan,
 }
 
+/// A JSX element that a `}` closes before its closing tag.
+///
+/// `@tsrx/core` 0.5 reads a JavaScript comment in JSX text as a comment, so a comment can swallow
+/// an element's closing tag (`<p>// c</p>`). Core then ends the element at the `}` that closes the
+/// enclosing template or function and reports `Unclosed tag`. The parser projection writes the
+/// missing closing tag in front of that `}` (`offset`), and the parse reports the error.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImplicitClose {
+    /// The authored `}` the element ends at.
+    pub offset: u32,
+    /// The element's authored tag name; empty for a fragment.
+    pub name: ByteSpan,
+}
+
+impl ImplicitClose {
+    /// `@tsrx/core`'s message for the element this closes.
+    #[must_use]
+    pub fn message(self, source: &str) -> String {
+        unclosed_tag_message(
+            source.get(self.name.start as usize..self.name.end as usize).unwrap_or_default(),
+        )
+    }
+}
+
+/// `@tsrx/core`'s `Unclosed tag` message for the tag written `name` (empty for a fragment).
+#[must_use]
+pub fn unclosed_tag_message(name: &str) -> String {
+    format!("Unclosed tag '<{name}>'. Expected '</{name}>' before end of template.")
+}
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ForHeader {
@@ -275,6 +306,10 @@ pub struct OverlayView<'a> {
     pub dynamic_comments: &'a [ByteSpan],
     pub style_blocks: &'a [OverlayStyleBlock],
     pub script_blocks: &'a [ScriptBlock],
+    /// JavaScript comments in JSX text, in source order. They are comments, not text.
+    pub jsx_text_comments: &'a [ByteSpan],
+    /// Elements a `}` closed before their closing tag, innermost first at each offset.
+    pub implicit_closes: &'a [ImplicitClose],
     pub first_root: u32,
 }
 
@@ -299,6 +334,14 @@ pub struct Overlay {
     /// ascending order. Each one needs a projected `;` so the legal-TSX lane reads the same
     /// statement boundary the TSRX scanner did.
     pub(crate) statement_boundaries: Vec<u32>,
+    /// JavaScript comments in JSX text (`//` from the start of a line or of a text run to the
+    /// line break, `/* ... */` anywhere), in source order. The parser and lint projections keep
+    /// them out of the text OXC reads.
+    pub(crate) jsx_text_comments: Vec<ByteSpan>,
+    /// Each JSX text run that holds a comment, trimmed of edge whitespace that holds a line
+    /// break, in source order. The formatter projection holds each run out of Oxfmt whole.
+    pub(crate) jsx_text_comment_runs: Vec<ByteSpan>,
+    pub(crate) implicit_closes: Vec<ImplicitClose>,
     pub(crate) first_root: u32,
     pub(crate) last_root: u32,
 }
@@ -324,8 +367,22 @@ impl Overlay {
             dynamic_comments: &self.dynamic_comments,
             style_blocks: &self.style_blocks,
             script_blocks: &self.script_blocks,
+            jsx_text_comments: &self.jsx_text_comments,
+            implicit_closes: &self.implicit_closes,
             first_root: self.first_root,
         }
+    }
+
+    /// JavaScript comments in JSX text, in source order.
+    #[must_use]
+    pub fn jsx_text_comments(&self) -> &[ByteSpan] {
+        &self.jsx_text_comments
+    }
+
+    /// Elements a `}` closed before their closing tag.
+    #[must_use]
+    pub fn implicit_closes(&self) -> &[ImplicitClose] {
+        &self.implicit_closes
     }
 
     #[must_use]

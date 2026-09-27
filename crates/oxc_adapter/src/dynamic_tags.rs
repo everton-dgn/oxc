@@ -1,34 +1,55 @@
 use std::{error::Error, fmt};
 
-use oxc_ast::ast::{
-    ArrayExpression, BinaryExpression, CallExpression, ChainElement, Expression, JSXAttributeValue,
-    JSXOpeningElement, NewExpression, ObjectExpression, SpreadElement, TaggedTemplateExpression,
-    TemplateLiteral,
-};
+use oxc_ast::ast::{Expression, JSXAttributeValue, JSXOpeningElement};
 use oxc_ast_visit::{Visit, walk};
 use oxc_span::{GetSpan, Span};
-use oxc_syntax::operator::{BinaryOperator, UnaryOperator};
 
 use crate::DynamicTagContract;
 
+/// `@tsrx/core`'s message for a dynamic tag expression that isn't one of the allowed forms.
+pub const DYNAMIC_TAG_EXPRESSION_MESSAGE: &str = "A dynamic tag expression must be an identifier, a member access such as `props.as` or `registry[name]`, or a string literal. Compute anything else before the element: `const Tag = c ? Child : Fallback;`, then `<{Tag} />`.";
+
+/// `@tsrx/core`'s diagnostic code for a dynamic tag expression that isn't one of the allowed forms.
+pub const DYNAMIC_TAG_EXPRESSION_CODE: &str = "tsrx-dynamic-tag-expression";
+
+/// The part of one dynamic tag expression that isn't an allowed form, in projected-source bytes.
+///
+/// This is a recoverable report, not a parse failure: the parse keeps its Program, a strict
+/// consumer throws it, and a collecting consumer records it and goes on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidDynamicTag {
+    /// The scaffold ordinal of the element whose opening tag holds the expression.
+    pub index: usize,
+    /// Projected-source start of the invalid part, including any parentheses around it.
+    pub start: u32,
+    /// Projected-source end of the invalid part, including any parentheses around it.
+    pub end: u32,
+}
+
+/// Validates the dynamic-tag scaffolds of a toolchain (format or lint) projection and returns the
+/// authored expressions `@tsrx/core` reports, in toolchain-projection bytes.
+///
+/// The toolchain lanes format and lint a file whose dynamic tag expressions the parser only
+/// reports, as `@tsrx/core` formatters do, so only the scaffold contract can fail here. The lint
+/// lane surfaces the reports as error diagnostics, as core's editor tooling does. The toolchain
+/// projection writes the expression as `{expression}`, without the parser projection's generated
+/// parentheses, so every parenthesis inside the container is authored.
 #[cfg(feature = "toolchain")]
-pub(crate) fn validate_dynamic_tags(
+pub(crate) fn find_invalid_dynamic_tags(
     program: &oxc_ast::ast::Program<'_>,
     contract: Option<DynamicTagContract<'_>>,
-) -> Result<(), DynamicTagError> {
-    validate_dynamic_tags_with_synthetic_calls(program, contract, &[])
+) -> Result<Vec<InvalidDynamicTag>, DynamicTagError> {
+    validate(program, contract, &[], false)
 }
 
 /// Why a TSRX dynamic-tag scaffold did not validate against the parsed OXC AST.
 ///
-/// Exactly one variant, [`Self::AuthoredGrammar`], is the user's defect: it names a tag expression
-/// the TSRX grammar does not accept and positions it in the authored source. Every other variant
-/// describes an inconsistent scaffold contract, which is a projector or adapter defect rather than
-/// anything an author wrote.
+/// Every variant describes an inconsistent scaffold contract, which is a projector or adapter
+/// defect rather than anything an author wrote. An authored expression that isn't an allowed tag
+/// form is no error: `@tsrx/core` reports it without changing the parse, so it comes back as an
+/// [`InvalidDynamicTag`] next to a valid scaffold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DynamicTagError {
-    /// The authored expression is not one of the shapes a TSRX dynamic tag may hold.
-    AuthoredGrammar { index: usize, offset: u32 },
     /// The synthetic callee spans were not handed over in ascending order.
     UnorderedSyntheticCallees,
     /// The contract claims more dynamic tags than this target can address.
@@ -53,42 +74,9 @@ pub enum DynamicTagError {
     MissingEndScaffold { index: usize },
 }
 
-impl DynamicTagError {
-    /// The authored-source UTF-8 byte offset this failure points at, when it has one.
-    ///
-    /// Only [`Self::AuthoredGrammar`] is positioned; the rest describe a whole-contract defect
-    /// with no authored location. This accessor exists so a caller that needs the position never
-    /// has to scrape it back out of the [`fmt::Display`] text.
-    ///
-    /// Every positionless variant is written out rather than caught by a wildcard, so adding a
-    /// positioned variant fails the build here instead of silently reporting `None` and handing an
-    /// editor the wrong diagnostic range.
-    #[must_use]
-    pub const fn byte_offset(&self) -> Option<u32> {
-        match self {
-            Self::AuthoredGrammar { offset, .. } => Some(*offset),
-            Self::UnorderedSyntheticCallees
-            | Self::CountExceedsAddressableMemory
-            | Self::EmptyContract
-            | Self::MalformedScaffold
-            | Self::InvalidScaffold { .. }
-            | Self::LostScaffold { .. }
-            | Self::MismatchedEndScaffold { .. }
-            | Self::MalformedAttribute { .. }
-            | Self::MismatchedAttribute { .. }
-            | Self::MissingExpression { .. }
-            | Self::MissingEndScaffold { .. } => None,
-        }
-    }
-}
-
 impl fmt::Display for DynamicTagError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::AuthoredGrammar { index, offset } => write!(
-                formatter,
-                "TSRX dynamic tag {index} at source byte {offset} must be an identifier, member, static string, or runtime expression without calls, construction, spreads, concatenation, interpolation, objects, or arrays"
-            ),
             Self::UnorderedSyntheticCallees => {
                 formatter.write_str("unordered synthetic callee span contract")
             }
@@ -126,16 +114,28 @@ impl fmt::Display for DynamicTagError {
 
 impl Error for DynamicTagError {}
 
+/// Validates the dynamic-tag scaffolds of a parser projection, which wraps each expression in
+/// generated parentheses, and returns the reports in parser-projection bytes.
+#[cfg(feature = "parser")]
 pub(crate) fn validate_dynamic_tags_with_synthetic_calls(
     program: &oxc_ast::ast::Program<'_>,
     contract: Option<DynamicTagContract<'_>>,
     synthetic_callee_spans: &[(u32, u32)],
-) -> Result<(), DynamicTagError> {
+) -> Result<Vec<InvalidDynamicTag>, DynamicTagError> {
+    validate(program, contract, synthetic_callee_spans, true)
+}
+
+fn validate(
+    program: &oxc_ast::ast::Program<'_>,
+    contract: Option<DynamicTagContract<'_>>,
+    synthetic_callee_spans: &[(u32, u32)],
+    wrapped: bool,
+) -> Result<Vec<InvalidDynamicTag>, DynamicTagError> {
     if synthetic_callee_spans.windows(2).any(|pair| pair[0] >= pair[1]) {
         return Err(DynamicTagError::UnorderedSyntheticCallees);
     }
     let Some(contract) = contract else {
-        return Ok(());
+        return Ok(Vec::new());
     };
     let count = usize::try_from(contract.count)
         .map_err(|_| DynamicTagError::CountExceedsAddressableMemory)?;
@@ -144,10 +144,10 @@ pub(crate) fn validate_dynamic_tags_with_synthetic_calls(
     }
     let mut validator = DynamicTagValidator {
         prefix: contract.prefix,
-        original_offsets: contract.original_offsets,
-        synthetic_callee_spans,
+        source: program.source_text,
+        wrapped,
         seen: vec![false; count],
-        validated_expression: None,
+        invalid: Vec::new(),
         error: None,
     };
     validator.visit_program(program);
@@ -157,15 +157,16 @@ pub(crate) fn validate_dynamic_tags_with_synthetic_calls(
     if let Some(index) = validator.seen.iter().position(|seen| !seen) {
         return Err(DynamicTagError::LostScaffold { index });
     }
-    Ok(())
+    Ok(validator.invalid)
 }
 
 struct DynamicTagValidator<'c> {
     prefix: &'c str,
-    original_offsets: &'c [u32],
-    synthetic_callee_spans: &'c [(u32, u32)],
+    source: &'c str,
+    /// Whether the projection wrapped each expression in generated parentheses.
+    wrapped: bool,
     seen: Vec<bool>,
-    validated_expression: Option<Span>,
+    invalid: Vec<InvalidDynamicTag>,
     error: Option<DynamicTagError>,
 }
 
@@ -192,41 +193,45 @@ impl<'a> Visit<'a> for DynamicTagValidator<'_> {
             return;
         }
 
-        let expression = match dynamic_tag_expression(element, self.prefix, index) {
-            Ok(expression) => expression,
+        let (container, expression) = match dynamic_tag_expression(element, self.prefix, index) {
+            Ok(found) => found,
             Err(error) => {
                 self.error = Some(error);
                 return;
             }
         };
-        let expression_span = expression.span();
-        let contained = self.validated_expression.is_some_and(|validated| {
-            validated.start <= expression_span.start && expression_span.end <= validated.end
-        });
-        let overlapping = self
-            .validated_expression
-            .is_some_and(|validated| expression_span.start < validated.end && !contained);
-        if !is_valid_dynamic_root(expression)
-            || root_is_synthetic_call(expression, self.synthetic_callee_spans)
-            || overlapping
-            || !contained
-                && has_disallowed_dynamic_syntax(
-                    expression,
-                    self.prefix,
-                    self.synthetic_callee_spans,
-                )
-        {
-            self.error = Some(DynamicTagError::AuthoredGrammar {
-                index,
-                offset: self.original_offsets[index],
-            });
-            return;
-        }
-        if !contained {
-            self.validated_expression = Some(expression_span);
-        }
+        // The parser projection writes the authored expression as `{(expression)}`. Those two
+        // parentheses are generated, so only parentheses strictly inside them are authored. The
+        // toolchain projection writes `{expression}`, so its parentheses are all authored.
+        let bytes = self.source.as_bytes();
+        let generated = self.wrapped
+            && bytes.get(container.start as usize + 1) == Some(&b'(')
+            && container.end >= 2
+            && bytes.get(container.end as usize - 2) == Some(&b')');
+        let inset = if generated { 2 } else { 1 };
+        let authored = Span::new(
+            container.start.saturating_add(inset),
+            container.end.saturating_sub(inset).max(container.start.saturating_add(inset)),
+        );
+        let expression = match expression {
+            Expression::ParenthesizedExpression(wrapper)
+                if wrapper.span.start.saturating_add(1) == authored.start
+                    && wrapper.span.end.saturating_sub(1) == authored.end =>
+            {
+                &wrapper.expression
+            }
+            expression => expression,
+        };
+        let parts = DynamicTagParts { source: self.source, authored };
+        let invalid = parts.invalid_part(expression);
         self.seen[index] = true;
+        // `@tsrx/core` checks an opening tag once its name is parsed, so a dynamic tag nested in
+        // the name expression reports first. A nested tag in the closing name is a child here and
+        // reports after, as it does there.
         walk::walk_jsx_opening_element(self, element);
+        if let Some(span) = invalid {
+            self.invalid.push(InvalidDynamicTag { index, start: span.start, end: span.end });
+        }
     }
 }
 
@@ -234,7 +239,7 @@ fn dynamic_tag_expression<'a, 'element>(
     element: &'element JSXOpeningElement<'a>,
     prefix: &str,
     index: usize,
-) -> Result<&'element Expression<'a>, DynamicTagError> {
+) -> Result<(Span, &'element Expression<'a>), DynamicTagError> {
     let mut expression = None;
     let mut end_sentinel = false;
     for item in &element.attributes {
@@ -270,7 +275,7 @@ fn dynamic_tag_expression<'a, 'element>(
         }
         expression = attribute.value.as_ref().and_then(|value| match value {
             JSXAttributeValue::ExpressionContainer(container) => {
-                container.expression.as_expression()
+                container.expression.as_expression().map(|expression| (container.span, expression))
             }
             _ => None,
         });
@@ -291,135 +296,121 @@ fn scaffold_ordinal(name: &str, prefix: &str, kind: char, suffix: bool) -> Optio
     digits.parse().ok()
 }
 
-fn has_disallowed_dynamic_syntax(
-    expression: &Expression<'_>,
-    prefix: &str,
-    synthetic_callee_spans: &[(u32, u32)],
-) -> bool {
-    let mut validator = DisallowedDynamicSyntax {
-        prefix,
-        synthetic_callee_spans,
-        found: false,
-        allow_synthetic_object: false,
-    };
-    validator.visit_expression(expression);
-    validator.found
+/// `@tsrx/core`'s `find_invalid_dynamic_tag_part` over OXC's AST.
+///
+/// A dynamic tag expression is an identifier, a member access chain that starts at an identifier
+/// or `this` and whose computed keys are identifiers, string or number literals, or member
+/// accesses, or a string literal. The search follows only a member access's object and computed
+/// key and returns the first part that isn't allowed, widened over the parentheses around it.
+///
+/// OXC may be asked not to keep parentheses as nodes, so a part is parenthesized when authored
+/// parentheses enclose exactly its span. That reads only the source between the generated
+/// parentheses the projection wraps the expression in.
+struct DynamicTagParts<'s> {
+    source: &'s str,
+    authored: Span,
 }
 
-fn root_is_synthetic_call(
-    mut expression: &Expression<'_>,
-    synthetic_callee_spans: &[(u32, u32)],
-) -> bool {
-    loop {
-        expression = match expression {
-            Expression::ParenthesizedExpression(wrapper) => &wrapper.expression,
-            Expression::TSAsExpression(wrapper) => &wrapper.expression,
-            Expression::TSTypeAssertion(wrapper) => &wrapper.expression,
-            Expression::TSNonNullExpression(wrapper) => &wrapper.expression,
-            _ => break,
-        };
-    }
-    let Expression::CallExpression(call) = expression else {
-        return false;
-    };
-    let span = call.callee.span();
-    synthetic_callee_spans.binary_search(&(span.start, span.end)).is_ok()
-}
-
-fn is_valid_dynamic_root(expression: &Expression<'_>) -> bool {
-    match expression {
-        Expression::ParenthesizedExpression(wrapper) => is_valid_dynamic_root(&wrapper.expression),
-        Expression::TSAsExpression(wrapper) => is_valid_dynamic_root(&wrapper.expression),
-        Expression::TSTypeAssertion(wrapper) => is_valid_dynamic_root(&wrapper.expression),
-        Expression::TSNonNullExpression(wrapper) => is_valid_dynamic_root(&wrapper.expression),
-        Expression::ChainExpression(wrapper) => match &wrapper.expression {
-            ChainElement::CallExpression(_) => false,
-            ChainElement::TSNonNullExpression(inner) => is_valid_dynamic_root(&inner.expression),
-            _ => true,
-        },
-        Expression::Identifier(identifier) => identifier.name != "undefined",
-        Expression::BooleanLiteral(_)
-        | Expression::NullLiteral(_)
-        | Expression::NumericLiteral(_)
-        | Expression::BigIntLiteral(_)
-        | Expression::RegExpLiteral(_)
-        | Expression::JSXElement(_)
-        | Expression::JSXFragment(_) => false,
-        Expression::UnaryExpression(unary) => unary.operator != UnaryOperator::Void,
-        _ => true,
-    }
-}
-
-struct DisallowedDynamicSyntax<'a> {
-    prefix: &'a str,
-    synthetic_callee_spans: &'a [(u32, u32)],
-    found: bool,
-    allow_synthetic_object: bool,
-}
-
-impl<'a> Visit<'a> for DisallowedDynamicSyntax<'_> {
-    fn visit_array_expression(&mut self, _expression: &ArrayExpression<'a>) {
-        self.found = true;
-    }
-
-    fn visit_object_expression(&mut self, expression: &ObjectExpression<'a>) {
-        if std::mem::take(&mut self.allow_synthetic_object) {
-            walk::walk_object_expression(self, expression);
-        } else {
-            self.found = true;
+impl DynamicTagParts<'_> {
+    fn invalid_part(&self, expression: &Expression<'_>) -> Option<Span> {
+        if let Some(span) = self.parenthesized(expression) {
+            return Some(span);
         }
-    }
-
-    fn visit_call_expression(&mut self, expression: &CallExpression<'a>) {
-        let callee_span = expression.callee.span();
-        let synthetic = self
-            .synthetic_callee_spans
-            .binary_search(&(callee_span.start, callee_span.end))
-            .is_ok();
-        if synthetic {
-            self.allow_synthetic_object = match &expression.callee {
-                Expression::Identifier(identifier) => {
-                    let name = identifier.name.as_str();
-                    scaffold_ordinal(name, self.prefix, 'W', true).is_some()
-                        || scaffold_ordinal(name, self.prefix, 'T', true).is_some()
-                }
-                _ => false,
-            };
-            walk::walk_call_expression(self, expression);
-            if self.allow_synthetic_object {
-                self.allow_synthetic_object = false;
-                self.found = true;
+        match expression {
+            Expression::Identifier(identifier) => {
+                (identifier.name == "undefined").then_some(identifier.span)
             }
-        } else {
-            self.found = true;
+            Expression::StringLiteral(_) => None,
+            Expression::StaticMemberExpression(member) => self.invalid_object(&member.object),
+            Expression::PrivateFieldExpression(member) => self.invalid_object(&member.object),
+            Expression::ComputedMemberExpression(member) => {
+                self.invalid_object(&member.object).or_else(|| self.invalid_key(&member.expression))
+            }
+            expression => Some(expression.span()),
         }
     }
 
-    fn visit_new_expression(&mut self, _expression: &NewExpression<'a>) {
-        self.found = true;
-    }
-
-    fn visit_spread_element(&mut self, _spread: &SpreadElement<'a>) {
-        self.found = true;
-    }
-
-    fn visit_tagged_template_expression(&mut self, _expression: &TaggedTemplateExpression<'a>) {
-        self.found = true;
-    }
-
-    fn visit_template_literal(&mut self, template: &TemplateLiteral<'a>) {
-        if template.expressions.is_empty() {
-            walk::walk_template_literal(self, template);
-        } else {
-            self.found = true;
+    fn invalid_object(&self, object: &Expression<'_>) -> Option<Span> {
+        match object {
+            Expression::Identifier(_)
+            | Expression::StaticMemberExpression(_)
+            | Expression::PrivateFieldExpression(_)
+            | Expression::ComputedMemberExpression(_) => self.invalid_part(object),
+            Expression::ThisExpression(_) => self.parenthesized(object),
+            object => Some(self.widen(object.span())),
         }
     }
 
-    fn visit_binary_expression(&mut self, expression: &BinaryExpression<'a>) {
-        if expression.operator == BinaryOperator::Addition {
-            self.found = true;
-        } else {
-            walk::walk_binary_expression(self, expression);
+    fn invalid_key(&self, key: &Expression<'_>) -> Option<Span> {
+        if let Some(span) = self.parenthesized(key) {
+            return Some(span);
+        }
+        match key {
+            Expression::Identifier(_)
+            | Expression::StringLiteral(_)
+            | Expression::NumericLiteral(_) => None,
+            Expression::StaticMemberExpression(_)
+            | Expression::PrivateFieldExpression(_)
+            | Expression::ComputedMemberExpression(_) => self.invalid_part(key),
+            key => Some(key.span()),
+        }
+    }
+
+    /// The span of `expression` and the parentheses around it, when there are any.
+    fn parenthesized(&self, expression: &Expression<'_>) -> Option<Span> {
+        let span = expression.span();
+        let widened = self.widen(span);
+        (widened != span || matches!(expression, Expression::ParenthesizedExpression(_)))
+            .then_some(widened)
+    }
+
+    /// Widens `span` over every pair of authored parentheses that encloses exactly it.
+    fn widen(&self, mut span: Span) -> Span {
+        loop {
+            let (Some(before), Some(after)) =
+                (self.trivia_before(span.start), self.trivia_after(span.end))
+            else {
+                return span;
+            };
+            let bytes = self.source.as_bytes();
+            let opens =
+                before > self.authored.start && bytes.get(before as usize - 1) == Some(&b'(');
+            let closes = after < self.authored.end && bytes.get(after as usize) == Some(&b')');
+            if !(opens && closes) {
+                return span;
+            }
+            span = Span::new(before - 1, after + 1);
+        }
+    }
+
+    /// The offset before the whitespace and block comments that end at `offset`.
+    fn trivia_before(&self, offset: u32) -> Option<u32> {
+        let mut text = self.source.get(self.authored.start as usize..offset as usize)?;
+        loop {
+            let trimmed = text.trim_end();
+            text = match trimmed.strip_suffix("*/").and_then(|inner| inner.rfind("/*")) {
+                Some(comment_start) => &trimmed[..comment_start],
+                None => {
+                    return u32::try_from(self.authored.start as usize + trimmed.len()).ok();
+                }
+            };
+        }
+    }
+
+    /// The offset after the whitespace and comments that start at `offset`.
+    fn trivia_after(&self, offset: u32) -> Option<u32> {
+        let text = self.source.get(offset as usize..self.authored.end as usize)?;
+        let mut rest = text;
+        loop {
+            let trimmed = rest.trim_start();
+            rest = if let Some(line) = trimmed.strip_prefix("//") {
+                line.find(['\n', '\r', '\u{2028}', '\u{2029}']).map_or("", |end| &line[end..])
+            } else if let Some(block) = trimmed.strip_prefix("/*") {
+                &block[block.find("*/")? + 2..]
+            } else {
+                let consumed = text.len() - trimmed.len();
+                return u32::try_from(offset as usize + consumed).ok();
+            };
         }
     }
 }
@@ -429,16 +420,10 @@ mod tests {
     use super::DynamicTagError;
 
     #[test]
-    fn byte_offset_covers_exactly_the_positioned_variants() {
-        let positioned = [DynamicTagError::AuthoredGrammar { index: 0, offset: 7 }];
-        for error in &positioned {
-            assert_eq!(error.byte_offset(), Some(7), "{error}");
-            // The accessor must agree with the offset the message already prints, which is the
-            // whole reason a caller must never scrape the position back out of the text.
-            assert!(error.to_string().contains("source byte 7"), "{error}");
-        }
-
-        let positionless = [
+    fn every_variant_is_a_positionless_contract_defect() {
+        // An authored tag expression is reported with its Program, never as one of these, so no
+        // message may carry an authored position for an editor to scrape.
+        let variants = [
             DynamicTagError::UnorderedSyntheticCallees,
             DynamicTagError::CountExceedsAddressableMemory,
             DynamicTagError::EmptyContract,
@@ -451,8 +436,7 @@ mod tests {
             DynamicTagError::MissingExpression { index: 3 },
             DynamicTagError::MissingEndScaffold { index: 3 },
         ];
-        for error in &positionless {
-            assert_eq!(error.byte_offset(), None, "{error}");
+        for error in &variants {
             assert!(!error.to_string().contains("byte "), "{error}");
         }
     }

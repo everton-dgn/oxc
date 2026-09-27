@@ -3,9 +3,9 @@
 use crate::{
     diagnostics::{ProjectionError, to_u32},
     model::{
-        ByteSpan, ControlContext, DynamicTag, EmbeddedKind, EmbeddedToken, NONE, ParserCodeBlock,
-        ParserCodeBlockKind, ParserDynamicKind, ParserDynamicToken, ParserShorthandAttribute,
-        ScriptBlock, StructuralKind, StyleBlock,
+        ByteSpan, ControlContext, DynamicTag, EmbeddedKind, EmbeddedToken, ImplicitClose, NONE,
+        ParserCodeBlock, ParserCodeBlockKind, ParserDynamicKind, ParserDynamicToken,
+        ParserShorthandAttribute, ScriptBlock, StructuralKind, StyleBlock,
     },
 };
 
@@ -102,6 +102,10 @@ impl Scanner<'_> {
             }
         }
 
+        // The tag as written, for `@tsrx/core`'s `Unclosed tag` message: the name, empty for a
+        // fragment, or a dynamic tag's braced expression.
+        let display_name =
+            ByteSpan::new(to_u32(name_start)?, to_u32(if dynamic { index } else { name_end })?);
         let style = !fragment && !dynamic && self.bytes[name_start..name_end] == *b"style";
         let script = !fragment && !dynamic && self.bytes[name_start..name_end] == *b"script";
         // Parser owners are preorder identities. Reserve before scanning attributes because a JSX
@@ -245,18 +249,17 @@ impl Scanner<'_> {
         }
 
         if script {
-            let Some(relative_close) = find_bytes(&self.bytes[index..], b"</script>") else {
+            let Some((close_start, close_end)) = find_script_body_end(self.bytes, index) else {
                 return Err(ProjectionError::UnterminatedSyntax {
                     offset: to_u32(start)?,
                     construct: "inline `<script>` block",
                 });
             };
-            let close_start = index + relative_close;
             self.mark_surrogates(index, close_start, OpaqueSurrogateContext::JsxText);
             let content = ByteSpan::new(to_u32(index)?, to_u32(close_start)?);
             let owner = to_u32(self.script_blocks.len())?;
             self.script_blocks.push(ScriptBlock {
-                element: ByteSpan::new(to_u32(start)?, to_u32(close_start + "</script>".len())?),
+                element: ByteSpan::new(to_u32(start)?, to_u32(close_end)?),
                 content,
             });
             self.embedded_tokens.push(EmbeddedToken {
@@ -264,11 +267,21 @@ impl Scanner<'_> {
                 span: content,
                 owner,
             });
-            return Ok(close_start + "</script>".len());
+            return Ok(close_end);
         }
 
+        // The text run in progress began after the opening tag or the last child. A `//` is a
+        // comment only where nothing but spaces and tabs precede it on its line or in its run.
+        let mut run_start = index;
+        let mut run_has_comment = false;
+        // A comment in this element's text can swallow its closing tag. `@tsrx/core` then ends
+        // the element at the `}` that closes the template, or at the end of the source.
+        let mut closing_may_be_swallowed = false;
         loop {
             let Some(&byte) = self.bytes.get(index) else {
+                if closing_may_be_swallowed {
+                    return Err(self.unclosed_tag(index, display_name)?);
+                }
                 return Err(ProjectionError::UnterminatedSyntax {
                     offset: to_u32(start)?,
                     construct: "JSX element",
@@ -276,6 +289,7 @@ impl Scanner<'_> {
             };
             match byte {
                 b'<' if self.bytes.get(index + 1) == Some(&b'/') => {
+                    self.finish_text_run(run_start, index, run_has_comment)?;
                     let close_start = index;
                     index += 2;
                     let closing_dynamic = self.bytes.get(index) == Some(&b'{');
@@ -397,27 +411,50 @@ impl Scanner<'_> {
                     return Ok(index + 1);
                 }
                 b'<' if self.looks_like_jsx_start(index) => {
+                    self.finish_text_run(run_start, index, run_has_comment)?;
+                    let implicit_closes = self.implicit_closes.len();
                     index = self.scan_jsx_element(index)?;
+                    // A child a `}` closed early leaves this element open at the same `}`.
+                    if self.implicit_closes.len() > implicit_closes
+                        && self.bytes.get(index) == Some(&b'}')
+                    {
+                        closing_may_be_swallowed = true;
+                    }
+                    (run_start, run_has_comment) = (index, false);
                 }
-                b'{' => index = self.scan_expression_region(index + 1, Some(b'}'))?,
+                b'{' => {
+                    self.finish_text_run(run_start, index, run_has_comment)?;
+                    index = self.scan_expression_region(index + 1, Some(b'}'))?;
+                    (run_start, run_has_comment) = (index, false);
+                }
                 b'@' if self.keyword_at(index, b"if") && self.control_has_header(index, b"if") => {
+                    self.finish_text_run(run_start, index, run_has_comment)?;
                     index = self.parse_if(index, ControlContext::JsxChild)?;
+                    (run_start, run_has_comment) = (index, false);
                 }
                 b'@' if self.keyword_at(index, b"for")
                     && self.control_has_header(index, b"for") =>
                 {
+                    self.finish_text_run(run_start, index, run_has_comment)?;
                     index = self.parse_for(index, ControlContext::JsxChild)?;
+                    (run_start, run_has_comment) = (index, false);
                 }
                 b'@' if self.keyword_at(index, b"switch")
                     && self.control_has_header(index, b"switch") =>
                 {
+                    self.finish_text_run(run_start, index, run_has_comment)?;
                     index = self.parse_switch(index, ControlContext::JsxChild)?;
+                    (run_start, run_has_comment) = (index, false);
                 }
                 b'@' if self.keyword_at(index, b"try") && self.control_has_body(index, b"try") => {
+                    self.finish_text_run(run_start, index, run_has_comment)?;
                     index = self.parse_try(index, ControlContext::JsxChild)?;
+                    (run_start, run_has_comment) = (index, false);
                 }
                 b'@' if self.bytes.get(index + 1) == Some(&b'{') => {
+                    self.finish_text_run(run_start, index, run_has_comment)?;
                     index = self.scan_parser_code_block(index, ParserCodeBlockKind::JsxChild)?;
+                    (run_start, run_has_comment) = (index, false);
                 }
                 b'@' => {
                     if self.keyword_at(index, b"else")
@@ -442,12 +479,84 @@ impl Scanner<'_> {
                     }
                     index += 1;
                 }
+                // `@tsrx/core` 0.5 reads JavaScript comments in JSX text as comments, before it
+                // looks for tags or braces, so a comment can hold a `<`, `{`, `}`, or a whole tag.
+                b'/' if self.bytes.get(index + 1) == Some(&b'*') => {
+                    // With no `*/`, the comment runs to the end of the source.
+                    let body_end = find_bytes(&self.bytes[index + 2..], b"*/")
+                        .map_or(self.bytes.len(), |relative| index + 2 + relative);
+                    let end = (body_end + 2).min(self.bytes.len());
+                    self.mark_surrogates(index + 2, body_end, OpaqueSurrogateContext::Comment);
+                    self.jsx_text_comments.push(ByteSpan::new(to_u32(index)?, to_u32(end)?));
+                    (run_has_comment, closing_may_be_swallowed) = (true, true);
+                    index = end;
+                }
+                b'/' if self.bytes.get(index + 1) == Some(&b'/')
+                    && text_line_comment_starts(self.bytes, index, run_start) =>
+                {
+                    let end = self.skip_line_comment(index + 2);
+                    self.jsx_text_comments.push(ByteSpan::new(to_u32(index)?, to_u32(end)?));
+                    (run_has_comment, closing_may_be_swallowed) = (true, true);
+                    index = end;
+                }
+                b'}' if closing_may_be_swallowed => {
+                    self.finish_text_run(run_start, index, run_has_comment)?;
+                    if dynamic {
+                        // No projection can restore a dynamic closing tag it never saw.
+                        return Err(self.unclosed_tag(index, display_name)?);
+                    }
+                    self.implicit_closes
+                        .push(ImplicitClose { offset: to_u32(index)?, name: display_name });
+                    return Ok(index);
+                }
                 _ => {
                     self.mark_surrogates(index, index + 1, OpaqueSurrogateContext::JsxText);
                     index += 1;
                 }
             }
         }
+    }
+
+    /// Records the run of JSX text `[start, end)` when it holds a comment, for the formatter
+    /// projection, which holds the run out of Oxfmt whole. Edge whitespace stays outside, where
+    /// Oxfmt keeps a significant space and rewrites layout, except the spaces before a leading
+    /// line comment: the comment's line break makes them layout, but Oxfmt would read them as a
+    /// significant space.
+    fn finish_text_run(
+        &mut self,
+        start: usize,
+        end: usize,
+        has_comment: bool,
+    ) -> Result<(), ProjectionError> {
+        if !has_comment {
+            return Ok(());
+        }
+        let is_jsx_whitespace = |byte: &u8| matches!(byte, b' ' | b'\t' | b'\n' | b'\r');
+        let text = &self.bytes[start..end];
+        let leading = text.iter().take_while(|byte| is_jsx_whitespace(byte)).count();
+        let trailing =
+            text[leading..].iter().rev().take_while(|byte| is_jsx_whitespace(byte)).count();
+        let leading_layout = text[..leading].iter().any(|byte| matches!(byte, b'\n' | b'\r'));
+        let content_start = if !leading_layout && text[leading..].starts_with(b"//") {
+            start
+        } else {
+            start + leading
+        };
+        self.jsx_text_comment_runs
+            .push(ByteSpan::new(to_u32(content_start)?, to_u32(end - trailing)?));
+        Ok(())
+    }
+
+    fn unclosed_tag(
+        &self,
+        offset: usize,
+        display_name: ByteSpan,
+    ) -> Result<ProjectionError, ProjectionError> {
+        let name = std::str::from_utf8(
+            &self.bytes[display_name.start as usize..display_name.end as usize],
+        )
+        .map_err(|_| ProjectionError::SourceChanged { offset: display_name.start })?;
+        Ok(ProjectionError::UnclosedTag { offset: to_u32(offset)?, name: name.to_owned() })
     }
 
     fn skip_jsx_tag_trivia(&self, mut index: usize) -> Result<usize, ProjectionError> {
@@ -590,6 +699,48 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         return Some(0);
     }
     haystack.windows(needle.len()).position(|window| window == needle)
+}
+
+/// Finds where a raw `<script>` body ends, as HTML ends it: at the first `</script` written in
+/// lowercase and followed by optional HTML whitespace (tab, LF, FF, CR, space) and `>`. Returns the
+/// closing tag's `[start, end)`, which includes that whitespace. Any other `</script` in the body
+/// (another letter case, `</scripts>`, `</script/>`) stays body text; the compat facade reports
+/// it as `@tsrx/core` does.
+fn find_script_body_end(bytes: &[u8], content_start: usize) -> Option<(usize, usize)> {
+    const OPEN: &[u8] = b"</script";
+    let mut cursor = content_start;
+    while let Some(relative) = find_bytes(bytes.get(cursor..)?, OPEN) {
+        let close_start = cursor + relative;
+        let mut index = close_start + OPEN.len();
+        while bytes.get(index).copied().is_some_and(is_html_whitespace) {
+            index += 1;
+        }
+        if bytes.get(index) == Some(&b'>') {
+            return Some((close_start, index + 1));
+        }
+        cursor = close_start + OPEN.len();
+    }
+    None
+}
+
+/// HTML's whitespace: tab, line feed, form feed, carriage return, and space.
+const fn is_html_whitespace(byte: u8) -> bool {
+    matches!(byte, b'\t' | b'\n' | 0x0c | b'\r' | b' ')
+}
+
+/// A `//` in JSX text is a comment when only spaces and tabs precede it on its line, or since the
+/// text run began after a tag, a child element, or a braced child (`@tsrx/core` 0.5). Once real
+/// text has begun on the line, `//` is text, so `a // b` and `https://...` stay text.
+fn text_line_comment_starts(bytes: &[u8], index: usize, run_start: usize) -> bool {
+    let mut cursor = index;
+    while cursor > run_start {
+        match bytes[cursor - 1] {
+            b' ' | b'\t' => cursor -= 1,
+            b'\n' | b'\r' => return true,
+            _ => return false,
+        }
+    }
+    true
 }
 
 fn jsx_text_looks_structural(bytes: &[u8], index: usize) -> bool {

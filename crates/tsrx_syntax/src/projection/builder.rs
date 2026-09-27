@@ -9,7 +9,7 @@ use crate::{
 };
 
 use super::{
-    format::{HeaderManifest, TryManifest, WrapperManifest},
+    format::{HeaderManifest, RunEdge, TextRunManifest, TryManifest, WrapperManifest},
     mapping::MappedProjection,
     marker::{collision_free_prefix, validate_overlay_source},
 };
@@ -61,6 +61,8 @@ pub(super) struct BuiltProjection {
     pub(super) wrappers: Vec<WrapperManifest>,
     pub(super) headers: Vec<HeaderManifest>,
     pub(super) tries: Vec<TryManifest>,
+    /// The formatter lane's held JSX text runs, as `lift_formatted` writes them back.
+    pub(super) text_comment_payloads: Vec<TextRunManifest>,
 }
 
 struct Builder<'a> {
@@ -72,6 +74,11 @@ struct Builder<'a> {
     record_segments: bool,
     type_semantic: bool,
     cursor: usize,
+    /// Next unwritten entry of `overlay.jsx_text_comments` (lint and type lanes) or
+    /// `overlay.jsx_text_comment_runs` (formatter lane).
+    text_comment: usize,
+    /// What `lift_formatted` writes back for each held run, in run order.
+    text_comment_payloads: Vec<TextRunManifest>,
 }
 
 impl<'a> Builder<'a> {
@@ -107,12 +114,32 @@ impl<'a> Builder<'a> {
             record_segments,
             type_semantic,
             cursor: 0,
+            text_comment: 0,
+            text_comment_payloads: Vec::new(),
         }
     }
 
-    fn finish(mut self) -> Result<MappedProjection, ProjectionError> {
+    /// The formatter lane records no segments; it holds each JSX text run that has a comment out
+    /// of Oxfmt whole. The lint and type lanes write each comment as a comment instead.
+    const fn holds_text_comment_runs(&self) -> bool {
+        !self.record_segments
+    }
+
+    fn text_comment_events(&self) -> &'a [ByteSpan] {
+        if self.holds_text_comment_runs() {
+            &self.overlay.jsx_text_comment_runs
+        } else {
+            &self.overlay.jsx_text_comments
+        }
+    }
+
+    fn finish(mut self) -> Result<(MappedProjection, Vec<TextRunManifest>), ProjectionError> {
         self.copy_to(self.source.len())?;
-        Ok(MappedProjection {
+        if self.text_comment != self.text_comment_events().len() {
+            return Err(ProjectionError::StructuralMismatch);
+        }
+        let payloads = std::mem::take(&mut self.text_comment_payloads);
+        let mapped = MappedProjection {
             projected: self.output,
             segments: self.segments,
             dynamic_prefix: None,
@@ -120,7 +147,8 @@ impl<'a> Builder<'a> {
             dynamic_offsets: Vec::new(),
             synthetic_generator_spans: Vec::new(),
             synthetic_callee_spans: Vec::new(),
-        })
+        };
+        Ok((mapped, payloads))
     }
 
     fn copy_to(&mut self, end: usize) -> Result<(), ProjectionError> {
@@ -141,11 +169,92 @@ impl<'a> Builder<'a> {
         self.copy_original_with_fixability(span, true)
     }
 
+    /// Copies an authored span. A JavaScript comment in JSX text inside it is not text to OXC:
+    /// the lint and type lanes write it inside braces, `{/* ... */}` or `{// ...` and a line
+    /// break, where OXC reads it as a comment, and the formatter lane replaces the whole text
+    /// run that holds it with a marker `lift_formatted` restores.
     fn copy_original_with_fixability(
         &mut self,
         span: ByteSpan,
         fixable: bool,
     ) -> Result<(), ProjectionError> {
+        let events = self.text_comment_events();
+        let mut start = span.start;
+        while let Some(event) = events.get(self.text_comment).copied() {
+            if event.start >= span.end {
+                break;
+            }
+            if event.start < start || event.end > span.end {
+                return Err(ProjectionError::StructuralMismatch);
+            }
+            self.copy_plain(ByteSpan::new(start, event.start), fixable)?;
+            if self.holds_text_comment_runs() {
+                self.text_comment_run_marker(event)?;
+            } else {
+                self.output.push('{');
+                self.copy_plain(event, fixable)?;
+                if self.source.as_bytes().get(event.start as usize + 1) == Some(&b'/') {
+                    self.output.push('\n');
+                }
+                self.output.push('}');
+            }
+            self.text_comment += 1;
+            start = event.end;
+        }
+        self.copy_plain(ByteSpan::new(start, span.end), fixable)
+    }
+
+    /// Writes the formatter marker for one JSX text run holding a comment. A run that spans lines
+    /// or holds a line comment gets a line-comment marker, which Oxfmt always prints on lines of
+    /// its own, so the restored run keeps its own lines. A one-line run of block comments and text
+    /// stays inline.
+    ///
+    /// Whitespace between a comment at the run's edge and its text is the text's edge whitespace
+    /// once the comment is gone. Where it is significant (no line break around it), it moves out
+    /// in front of or behind the marker, where Oxfmt keeps it wherever it puts the marker. The
+    /// lift puts it back where it was authored wherever it stays on the run's line.
+    fn text_comment_run_marker(&mut self, run: ByteSpan) -> Result<(), ProjectionError> {
+        let ordinal = self.text_comment;
+        let bytes = self.source.as_bytes();
+        let comments = &self.overlay.jsx_text_comments;
+        let first = comments.partition_point(|comment| comment.start < run.start);
+        let last =
+            first + comments[first..].iter().take_while(|comment| comment.end <= run.end).count();
+        let comments = &comments[first..last];
+        let edges = run_edges(bytes, run, comments);
+
+        let authored = self
+            .source
+            .get(run.start as usize..run.end as usize)
+            .ok_or(ProjectionError::SourceChanged { offset: run.start })?;
+        let own_lines = authored.contains(['\n', '\r'])
+            || comments.iter().any(|comment| bytes.get(comment.start as usize + 1) == Some(&b'/'));
+        if let Some(space) = edges.hoisted_before {
+            self.output.push_str(&self.source[space..=space]);
+        }
+        if own_lines {
+            write!(self.output, "{{// {}Y{ordinal}__\n}}", self.prefix)
+        } else {
+            write!(self.output, "{{/*{}Y{ordinal}__*/}}", self.prefix)
+        }
+        .expect("writing to a String cannot fail");
+        if let Some(space) = edges.hoisted_after {
+            self.output.push_str(&self.source[space..=space]);
+        }
+        self.text_comment_payloads.push(TextRunManifest {
+            authored: authored.to_owned(),
+            hoisted_before: edges.hoisted_before.map(|space| space - run.start as usize),
+            hoisted_after: edges.hoisted_after.map(|space| space - run.start as usize),
+            before: edges.before,
+            after: edges.after,
+        });
+        Ok(())
+    }
+
+    fn copy_plain(&mut self, span: ByteSpan, fixable: bool) -> Result<(), ProjectionError> {
+        if span.is_empty() {
+            return Ok(());
+        }
         let start = span.start as usize;
         let end = span.end as usize;
         let Some(value) = self.source.get(start..end) else {
@@ -675,6 +784,101 @@ impl<'a> Builder<'a> {
     }
 }
 
+struct RunEdges {
+    /// The whitespace byte that moves out in front of the marker.
+    hoisted_before: Option<usize>,
+    /// The whitespace byte that moves out behind the marker.
+    hoisted_after: Option<usize>,
+    before: RunEdge,
+    after: RunEdge,
+}
+
+/// Reads the edges of one held JSX text run. Whitespace between a comment at the run's edge and
+/// its text is the text's edge whitespace once the comment is gone. Where it is significant (no
+/// line break in it) and the run has no authored whitespace beside it (Oxfmt prints a run of JSX
+/// spaces as one), one space of it moves out beside the marker, where Oxfmt keeps it wherever it
+/// puts the marker. The lift puts it back where it was authored wherever it stays on the run's
+/// line, so `</b>/* a */ x` comes back as written.
+fn run_edges(bytes: &[u8], run: ByteSpan, comments: &[ByteSpan]) -> RunEdges {
+    let is_space = |byte: &u8| matches!(byte, b' ' | b'\t' | b'\n' | b'\r');
+    let is_line_break = |byte: &u8| matches!(byte, b'\n' | b'\r');
+    let (start, end) = (run.start as usize, run.end as usize);
+
+    // Whitespace between the comments at the start of the run, up to its first text.
+    let mut leading = Vec::new();
+    let mut cursor = start;
+    let mut comment = 0;
+    loop {
+        let from = cursor;
+        while cursor < end && is_space(&bytes[cursor]) {
+            cursor += 1;
+        }
+        if cursor > from {
+            leading.push(from..cursor);
+        }
+        match comments.get(comment) {
+            Some(next) if next.start as usize == cursor => {
+                cursor = next.end as usize;
+                comment += 1;
+            }
+            _ => break,
+        }
+    }
+    let text_start = cursor;
+    // The same at the end of the run, back to its last text.
+    let mut trailing = Vec::new();
+    if text_start < end {
+        let mut cursor = end;
+        let mut comment = comments.len();
+        loop {
+            let to = cursor;
+            while cursor > text_start && is_space(&bytes[cursor - 1]) {
+                cursor -= 1;
+            }
+            if cursor < to {
+                trailing.push(cursor..to);
+            }
+            match comment.checked_sub(1).map(|index| comments[index]) {
+                Some(previous) if previous.end as usize == cursor => {
+                    cursor = previous.start as usize;
+                    comment -= 1;
+                }
+                _ => break,
+            }
+        }
+    }
+    let before = bytes[..start].iter().rev().take_while(|byte| is_space(byte));
+    let after = bytes[end..].iter().take_while(|byte| is_space(byte));
+    let significant = |pieces: &[std::ops::Range<usize>]| {
+        !pieces.is_empty()
+            && !pieces.iter().any(|range| bytes[range.clone()].iter().any(is_line_break))
+    };
+    let hoist_before = before.clone().next().is_none() && significant(&leading);
+    let hoist_after = after.clone().next().is_none() && significant(&trailing);
+    // A run with no text but comments and spaces renders only those spaces, so a line break
+    // Oxfmt adds beside its marker, where nothing separated it from its neighbour, would turn
+    // them into layout.
+    let blank = text_start >= end;
+    let edge_of = |hoisted: bool, authored: &[u8]| {
+        if hoisted || (!authored.is_empty() && !authored.iter().any(is_line_break)) {
+            RunEdge::Spaced
+        } else if blank && authored.is_empty() {
+            RunEdge::Glued
+        } else {
+            RunEdge::Plain
+        }
+    };
+    let before_bytes = &bytes[start - before.count()..start];
+    let after_bytes = &bytes[end..end + after.count()];
+    RunEdges {
+        // One space moves out; the rest stays in the run, which the lift keeps on its line.
+        hoisted_before: leading.last().filter(|_| hoist_before).map(|range| range.end - 1),
+        hoisted_after: trailing.first().filter(|_| hoist_after).map(|range| range.end - 1),
+        before: edge_of(hoist_before, before_bytes),
+        after: edge_of(hoist_after, after_bytes),
+    }
+}
+
 pub(super) fn build_projection(
     source: &str,
     overlay: &Overlay,
@@ -812,6 +1016,17 @@ pub(super) fn build_projection_with_purpose(
     purpose: ProjectionPurpose,
 ) -> Result<BuiltProjection, ProjectionError> {
     validate_overlay_source(source, overlay)?;
+    // A comment swallowed an element's closing tag. `@tsrx/core` rejects the source, and no
+    // tooling lane rewrites authored markup to close it.
+    if let Some(close) = overlay.implicit_closes.first() {
+        return Err(ProjectionError::UnclosedTag {
+            offset: close.offset,
+            name: source
+                .get(close.name.start as usize..close.name.end as usize)
+                .unwrap_or_default()
+                .to_owned(),
+        });
+    }
     let prefix = collision_free_prefix(source)?;
     let (wrapper_actions, wrappers) = build_wrapper_actions(overlay)?;
 
@@ -844,7 +1059,7 @@ pub(super) fn build_projection_with_purpose(
     while let Some(action) = pending.next()? {
         pending.apply(&mut builder, action)?;
     }
-    let mut mapped = builder.finish()?;
+    let (mut mapped, text_comment_payloads) = builder.finish()?;
     mapped.synthetic_generator_spans = overlay
         .nodes
         .iter()
@@ -857,7 +1072,7 @@ pub(super) fn build_projection_with_purpose(
         mapped.dynamic_offsets =
             overlay.dynamic_tags.iter().map(|tag| tag.expression.start).collect();
     }
-    Ok(BuiltProjection { mapped, prefix, wrappers, headers, tries })
+    Ok(BuiltProjection { mapped, prefix, wrappers, headers, tries, text_comment_payloads })
 }
 
 fn build_wrapper_actions(

@@ -212,20 +212,154 @@ fn script_payloads_remain_raw_text_through_the_oxc_parse() {
         scalar_field(result.program(), element, "content"),
         r#""{\"nested\":{\"enabled\":true},\"boundary\":\"</ScRiPt>\"}""#,
     );
-    let children = list_field(result.program(), element, "children");
-    assert_eq!(children.len(), 1);
-    let text = children[0].as_object().expect("script text");
-    require_type(result.program(), text, "JSXText");
-    let content_start = source.find("{\"nested\"").expect("content start");
+    // Like `@tsrx/core` 0.5 (tsrx-org/tsrx#790), the body lives only on `content`.
+    assert!(list_field(result.program(), element, "children").is_empty());
     let content_end = source.find("</script>").expect("closing script");
-    assert_eq!(span(result.program(), text), (offset(content_start), offset(content_end)));
-    assert_eq!(
-        scalar_field(result.program(), text, "raw"),
-        scalar_field(result.program(), element, "content")
-    );
+    let closing = object_field(result.program(), element, "closingElement");
+    assert_eq!(span(result.program(), closing), (offset(content_end), offset(source.len() - 2)));
     assert_no_scaffold(result.program());
 }
 
+fn visit_scripts(tape: &FlatTape, root: RecordIndex, found: &mut Vec<RecordIndex>) {
+    if scalar_field_opt(tape, root, "type") == Some(r#""JSXElement""#) {
+        let opening = object_field(tape, root, "openingElement");
+        let name = object_field(tape, opening, "name");
+        if scalar_field_opt(tape, name, "name") == Some(r#""script""#) {
+            found.push(root);
+        }
+    }
+    for record in tape.fields(root) {
+        collect_objects(tape, record.value, found);
+    }
+}
+
+fn collect_objects(tape: &FlatTape, value: ValueRef, found: &mut Vec<RecordIndex>) {
+    if let Some(object) = value.as_object() {
+        visit_scripts(tape, object, found);
+    } else if let Some(list) = value.as_list() {
+        for item in tape.values(list) {
+            collect_objects(tape, item, found);
+        }
+    }
+}
+
+fn scalar_field_opt<'a>(tape: &'a FlatTape, object: RecordIndex, name: &str) -> Option<&'a str> {
+    tape.field_index(object, name)
+        .and_then(|field| tape.field_value(field))
+        .and_then(|value| tape.scalar(value))
+}
+
+fn scripts(tape: &FlatTape) -> Vec<RecordIndex> {
+    let mut found = Vec::new();
+    collect_objects(tape, tape.root(), &mut found);
+    found
+}
+
+#[test]
+fn plain_function_script_bodies_are_raw_text_like_template_ones() {
+    // tsrx-org/oxc#114: `{}`, `<`, `>`, blocks, and JSON in a plain function's `<script>` are
+    // text, and the body is `content` as written, with no children.
+    for (body, attributes) in [
+        ("{code}", ""),
+        ("run(); {code}", ""),
+        ("\n\t\t\t// c\n\t\t\trun();\n\t\t", ""),
+        ("", ""),
+        ("if (a) { go(); }", ""),
+        (r#"{"a": 1}"#, r#" type="application/json""#),
+        ("if (a < b) go();", ""),
+        ("items.forEach((i) => log(i));", ""),
+    ] {
+        let source = format!(
+            "export function App({{ code }}) {{\n\treturn <div><script{attributes}>{body}</script></div>;\n}}"
+        );
+        let result = parse_tsrx(&TsrxParseRequest { source: &source })
+            .unwrap_or_else(|error| panic!("{source:?}: {error:?}"));
+        assert!(result.errors.is_empty(), "{source:?}: {:?}", result.errors);
+        let tape = result.program();
+        let [script] = scripts(tape)[..] else { panic!("{source:?}: one script element") };
+        let mut expected = String::new();
+        write_json_string(body, &mut expected);
+        assert_eq!(scalar_field(tape, script, "content"), expected, "{source:?}");
+        assert!(list_field(tape, script, "children").is_empty(), "{source:?}");
+        let content_end = source.rfind("</script>").expect("closing tag");
+        let closing = object_field(tape, script, "closingElement");
+        assert_eq!(span(tape, closing), (offset(content_end), offset(content_end + 9)));
+        assert_no_scaffold(tape);
+    }
+}
+
+#[test]
+fn a_script_body_ends_where_html_ends_it() {
+    // tsrx-org/oxc#116: `</script`, optional HTML whitespace (tab, LF, FF, CR, space), and `>`
+    // close the body, and the closing element covers that whitespace.
+    for (close, template) in [
+        ("</script >", true),
+        ("</script\n\t>", true),
+        ("</script\u{c}>", true),
+        ("</script \r\n>", true),
+        ("</script >", false),
+    ] {
+        let source = if template {
+            format!("export function App() @{{\n\t<div><script>go();{close}</div>\n}}")
+        } else {
+            format!("export function App() {{\n\treturn <script>go();{close};\n}}")
+        };
+        let result = parse_tsrx(&TsrxParseRequest { source: &source })
+            .unwrap_or_else(|error| panic!("{source:?}: {error:?}"));
+        assert!(result.errors.is_empty(), "{source:?}: {:?}", result.errors);
+        let tape = result.program();
+        let [script] = scripts(tape)[..] else { panic!("{source:?}: one script element") };
+        assert_eq!(scalar_field(tape, script, "content"), r#""go();""#, "{source:?}");
+        let close_start = source.find(close).expect("closing tag");
+        let closing = object_field(tape, script, "closingElement");
+        assert_eq!(
+            span(tape, closing),
+            (offset(close_start), offset(close_start + close.len())),
+            "{source:?}"
+        );
+        assert_eq!(span(tape, script).1, offset(close_start + close.len()));
+        assert_no_scaffold(tape);
+    }
+}
+
+#[test]
+fn other_script_end_tags_stay_in_the_body() {
+    // Only a lowercase `</script` followed by whitespace and `>` ends the body. The compat facade
+    // reports these others as `tsrx-script-end-tag-in-body`, as `@tsrx/core` does.
+    for inner in ["</SCRIPT>", "</script/>", "</scripts>", "</Script >"] {
+        let source = format!(
+            "export function App() @{{\n\t<div><script>a = 1;{inner}b = 2;</script></div>\n}}"
+        );
+        let result = parse_tsrx(&TsrxParseRequest { source: &source })
+            .unwrap_or_else(|error| panic!("{source:?}: {error:?}"));
+        let tape = result.program();
+        let [script] = scripts(tape)[..] else { panic!("{source:?}: one script element") };
+        let mut expected = String::new();
+        write_json_string(&format!("a = 1;{inner}b = 2;"), &mut expected);
+        assert_eq!(scalar_field(tape, script, "content"), expected, "{source:?}");
+        assert_no_scaffold(tape);
+    }
+    assert_failed("export function App() @{\n\t<div><script>go();</SCRIPT></div>\n}");
+}
+
+fn write_json_string(value: &str, output: &mut String) {
+    output.push('"');
+    for character in value.chars() {
+        match character {
+            '"' => output.push_str("\\\""),
+            '\\' => output.push_str("\\\\"),
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            '\u{c}' => output.push_str("\\f"),
+            character if u32::from(character) < 0x20 => {
+                write!(output, "\\u{:04x}", u32::from(character)).expect("write escape");
+            }
+            character => output.push(character),
+        }
+    }
+    output.push('"');
+}
 #[test]
 fn interleaved_style_and_script_payloads_preserve_source_order() {
     for source in [
@@ -1363,4 +1497,150 @@ fn nested_markup_lines_record_their_boundaries_in_source_order() {
     assert_eq!(list_field(tape, child, "body").len(), 1);
     require_type(tape, rendered(tape, child), "JSXElement");
     assert_no_scaffold(tape);
+}
+
+fn visit_texts(tape: &FlatTape, value: ValueRef, found: &mut Vec<(String, String, (u32, u32))>) {
+    if let Some(object) = value.as_object() {
+        if scalar_field_opt(tape, object, "type") == Some(r#""JSXText""#) {
+            found.push((
+                scalar_field(tape, object, "value").to_owned(),
+                scalar_field(tape, object, "raw").to_owned(),
+                span(tape, object),
+            ));
+        }
+        for record in tape.fields(object) {
+            visit_texts(tape, record.value, found);
+        }
+    } else if let Some(list) = value.as_list() {
+        for item in tape.values(list) {
+            visit_texts(tape, item, found);
+        }
+    }
+}
+
+fn jsx_texts(tape: &FlatTape) -> Vec<(String, String, (u32, u32))> {
+    let mut found = Vec::new();
+    visit_texts(tape, tape.root(), &mut found);
+    found
+}
+
+#[test]
+fn jsx_text_comments_are_read_before_tags_and_braces() {
+    // tsrx-org/oxc#110: `@tsrx/core` 0.5 reads a JavaScript comment in JSX text as a comment
+    // before it looks for tags or braces, in templates and in plain-function JSX alike. The text
+    // around a comment stays one text without it, and the comment joins the comment table.
+    for (source, expected, comment) in [
+        (
+            "export function App({ a }) @{\n\t<div>\n\t\t// <b>x</b>\n\t\t<i>y</i>\n\t</div>\n}",
+            vec![(r#""y""#, 56, 57)],
+            "// <b>x</b>",
+        ),
+        (
+            "export function App({ a }) {\n\treturn <div>\n\t\t/* {a} */\n\t\t<i>y</i>\n\t</div>;\n}",
+            vec![(r#""y""#, 60, 61)],
+            "/* {a} */",
+        ),
+        (
+            "export function App() {\n\treturn <div>a /* } */ b</div>;\n}",
+            vec![(r#""a  b""#, 37, 48)],
+            "/* } */",
+        ),
+        (
+            "export function App() @{\n\t<div>a /* < */ b</div>\n}",
+            vec![(r#""a  b""#, 31, 42)],
+            "/* < */",
+        ),
+        (
+            "export function App() @{\n\t<div>\n\t\tx\n\t\t// <b>q</b>\n\t</div>\n}",
+            vec![(r#""\n\t\tx\n\t\t\n\t""#, 31, 51)],
+            "// <b>q</b>",
+        ),
+        (
+            "export function App({ c }) @{\n\t<main>{c && <b>\n\t\t// n\n\t\tx /* y */ z\n\t</b>}</main>\n}",
+            vec![(r#""\n\t\t\n\t\tx  z\n\t""#, 46, 69)],
+            "// n",
+        ),
+    ] {
+        let result = parse_tsrx(&TsrxParseRequest { source })
+            .unwrap_or_else(|error| panic!("{source:?}: {error:?}"));
+        assert!(result.errors.is_empty(), "{source:?}: {:?}", result.errors);
+        let texts = jsx_texts(result.program());
+        let actual = texts
+            .iter()
+            .map(|(value, raw, span)| {
+                assert_eq!(value, raw, "{source:?}");
+                (value.as_str(), span.0, span.1)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected, "{source:?}");
+        let comment_start = offset(source.find(comment).expect("comment"));
+        assert!(
+            result.comments.records().iter().any(|record| record.span.start == comment_start
+                && record.span.end == comment_start + offset(comment.len())),
+            "{source:?}: {comment:?} is in the comment table"
+        );
+        assert_no_scaffold(result.program());
+    }
+}
+
+#[test]
+fn a_line_comment_after_text_on_its_line_stays_text() {
+    for source in [
+        "export function App() @{\n\t<p>see http://<b>x</b></p>\n}",
+        "export function App() {\n\treturn <p>a // b</p>;\n}",
+    ] {
+        let result = parse_tsrx(&TsrxParseRequest { source })
+            .unwrap_or_else(|error| panic!("{source:?}: {error:?}"));
+        assert!(result.errors.is_empty(), "{source:?}");
+        assert!(result.comments.records().is_empty(), "{source:?}");
+        assert!(
+            jsx_texts(result.program()).iter().any(|(value, _, _)| value.contains("//")),
+            "{source:?}"
+        );
+    }
+}
+
+#[test]
+fn a_comment_that_swallows_a_closing_tag_leaves_its_element_unclosed() {
+    // `<p>// c</p>`: the comment runs over `</p>`, and the element ends at the `}` closing the
+    // template or function, where `@tsrx/core` reports it. The tree survives with the error.
+    for source in [
+        "export function App() @{\n\t<div><p>// c</p></div>\n}",
+        "export function App() {\n\treturn <div><p>// c</p></div>;\n}",
+    ] {
+        let result = parse_tsrx(&TsrxParseRequest { source })
+            .unwrap_or_else(|error| panic!("{source:?}: {error:?}"));
+        let brace = offset(source.rfind('}').expect("closing brace"));
+        let messages = result
+            .errors
+            .records()
+            .iter()
+            .map(|error| {
+                let labels = result.errors.labels(error.labels).expect("labels");
+                (result.errors.string(error.message).expect("message"), labels[0].span.start)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            messages,
+            [
+                ("Unclosed tag '<p>'. Expected '</p>' before end of template.", brace),
+                ("Unclosed tag '<div>'. Expected '</div>' before end of template.", brace),
+            ],
+            "{source:?}"
+        );
+        assert!(result.program.is_some(), "{source:?}");
+        assert!(jsx_texts(result.program()).is_empty(), "{source:?}");
+        assert_no_scaffold(result.program());
+    }
+    // A block comment with no end runs to the end of the source, which no parse recovers from.
+    let source = "export function App() @{\n\t<p>a /* open\n\t\tb</p>\n}";
+    let result = parse_tsrx(&TsrxParseRequest { source }).expect("grammar result");
+    assert!(result.program.is_none());
+    let error = &result.errors.records()[0];
+    assert_eq!(
+        result.errors.string(error.message),
+        Some("Unclosed tag '<p>'. Expected '</p>' before end of template.")
+    );
+    let label = result.errors.labels(error.labels).expect("labels")[0];
+    assert_eq!(label.span.start, offset(source.len()));
 }

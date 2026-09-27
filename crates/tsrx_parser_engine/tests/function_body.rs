@@ -1,4 +1,7 @@
-use tsrx_parser_engine::{TsrxParseOptions, TsrxParseRequest, parse_tsrx, parse_tsrx_with_options};
+use tsrx_parser_engine::{
+    TsrxParseOptions, TsrxParseRequest, TsrxUtf16ParseRequest, parse_tsrx, parse_tsrx_utf16,
+    parse_tsrx_with_options,
+};
 use tsrx_tape_schema::{FlatTape, RecordIndex, ValueKind, ValueRef};
 
 fn field(tape: &FlatTape, object: RecordIndex, name: &str) -> ValueRef {
@@ -172,7 +175,7 @@ fn native_template_children_drop_layout_line_comments() {
 }
 
 #[test]
-fn native_template_text_drops_block_comments_from_value_but_preserves_raw_source() {
+fn native_template_text_drops_block_comments_from_value_and_raw() {
     let source = "function View() @{ <main>before/*M9_CHILDREN*/after<i/>/*only-comment*/</main> }";
     let result = parse_tsrx(&TsrxParseRequest { source }).expect("template block comments");
     let tape = result.program();
@@ -186,7 +189,9 @@ fn native_template_text_drops_block_comments_from_value_but_preserves_raw_source
     let text = children[0].as_object().expect("JSXText child");
     assert_eq!(scalar_field(tape, text, "type"), r#""JSXText""#);
     assert_eq!(scalar_field(tape, text, "value"), r#""beforeafter""#);
-    assert_eq!(scalar_field(tape, text, "raw"), r#""before/*M9_CHILDREN*/after""#);
+    // `@tsrx/core` 0.5 (tsrx-org/tsrx#711): a comment between children is not text, so `raw`
+    // leaves it out too.
+    assert_eq!(scalar_field(tape, text, "raw"), r#""beforeafter""#);
     assert_eq!(
         scalar_field(tape, children[1].as_object().expect("element child"), "type"),
         r#""JSXElement""#
@@ -208,4 +213,65 @@ fn reconstructs_jsx_child_code_blocks_when_parenthesis_nodes_are_disabled() {
     let main = object_field(tape, code_block, "render");
     let child = list_field(tape, main, "children")[0].as_object().expect("JSXCodeBlock child");
     assert_eq!(scalar_field(tape, child, "type"), r#""JSXCodeBlock""#);
+}
+
+fn rendered_children(tape: &FlatTape) -> Vec<ValueRef> {
+    let program = tape.root().as_object().expect("Program root");
+    let function = list_field(tape, program, "body")[0].as_object().expect("FunctionDeclaration");
+    let code_block = object_field(tape, function, "body");
+    let element = object_field(tape, code_block, "render");
+    list_field(tape, element, "children")
+}
+
+#[test]
+fn native_template_text_drops_line_comments_from_value_and_raw() {
+    // tsrx-org/oxc#110: a `//` with only whitespace before it on its line is a comment, and the
+    // whitespace around it stays, as in `@tsrx/core` 0.5. Inline `a // note` stays text.
+    let source = "function View() @{\n\t<p>\n\t\ta\n\t\t// note\n\t\tb\n\t</p>\n}";
+    let result = parse_tsrx(&TsrxParseRequest { source }).expect("template line comment");
+    let tape = result.program();
+    let children = rendered_children(tape);
+    assert_eq!(children.len(), 1);
+    let text = children[0].as_object().expect("JSXText child");
+    assert_eq!(scalar_field(tape, text, "type"), r#""JSXText""#);
+    assert_eq!(scalar_field(tape, text, "value"), r#""\n\t\ta\n\t\t\n\t\tb\n\t""#);
+    assert_eq!(scalar_field(tape, text, "raw"), r#""\n\t\ta\n\t\t\n\t\tb\n\t""#);
+
+    let source = "function View() @{\n\t<p>a // note</p>\n}";
+    let result = parse_tsrx(&TsrxParseRequest { source }).expect("inline slashes");
+    let tape = result.program();
+    let children = rendered_children(tape);
+    let text = children[0].as_object().expect("JSXText child");
+    assert_eq!(scalar_field(tape, text, "value"), r#""a // note""#);
+    assert_eq!(scalar_field(tape, text, "raw"), r#""a // note""#);
+
+    let source = "function View() @{\n\t<p>a &#47;* note *&#47; b</p>\n}";
+    let result = parse_tsrx(&TsrxParseRequest { source }).expect("escaped comment opener");
+    let tape = result.program();
+    let children = rendered_children(tape);
+    let text = children[0].as_object().expect("JSXText child");
+    assert_eq!(scalar_field(tape, text, "raw"), r#""a &#47;* note *&#47; b""#);
+}
+
+#[test]
+fn native_template_text_keeps_a_non_breaking_space_next_to_a_line_break() {
+    // tsrx-org/oxc#112: JSX whitespace is space, tab, CR, and LF, so U+00A0 is text even when a
+    // line break is next to it.
+    for (source, expected) in [
+        ("function View() @{\n\t<p>\u{a0}\n\t\t<b /></p>\n}", "\"\u{a0}\\n\\t\\t\""),
+        ("function View() @{\n\t<p><b />\n\t\t\u{a0}</p>\n}", "\"\\n\\t\\t\u{a0}\""),
+    ] {
+        // A non-ASCII source takes the UTF-16 route, as it does from the Node binding.
+        let units: Vec<u16> = source.encode_utf16().collect();
+        let result = parse_tsrx_utf16(&TsrxUtf16ParseRequest { source: &units })
+            .unwrap_or_else(|error| panic!("{source:?}: {error:?}"));
+        let tape = result.program();
+        let texts: Vec<_> = rendered_children(tape)
+            .into_iter()
+            .filter_map(ValueRef::as_object)
+            .filter(|child| scalar_field(tape, *child, "type") == r#""JSXText""#)
+            .collect();
+        assert_eq!(texts.len(), 1, "{source:?}");
+        assert_eq!(scalar_field(tape, texts[0], "value"), expected, "{source:?}");
+    }
 }

@@ -55,8 +55,11 @@ function parserOptions(filename, eagerTsrx = false) {
 	if (pathname.endsWith(".js") || pathname.endsWith(".mjs") || pathname.endsWith(".cjs")) return TYPESCRIPT_PARSER_OPTIONS;
 	return eagerTsrx ? EAGER_PARSER_OPTIONS : PARSER_OPTIONS;
 }
-const DYNAMIC_TAG_CANDIDATE_MESSAGE = /^TSRX dynamic tag \d+ at source byte \d+ must be an identifier, member, static string, or runtime expression without calls, construction, spreads, concatenation, interpolation, objects, or arrays$/u;
-const DYNAMIC_TAG_REFERENCE_MESSAGE = "Dynamic element names must be an identifier, member expression, static string, or runtime expression; calls, spreads, string concatenation, string interpolation, and static null, undefined, boolean, number, object, and array literals are not valid tag names.";
+const DYNAMIC_TAG_REFERENCE_MESSAGE = "A dynamic tag expression must be an identifier, a member access such as `props.as` or `registry[name]`, or a string literal. Compute anything else before the element: `const Tag = c ? Child : Fallback;`, then `<{Tag} />`.";
+const DYNAMIC_TAG_EXPRESSION_CODE = "tsrx-dynamic-tag-expression";
+const DYNAMIC_TAG_NOT_EXPRESSION_MESSAGE = /^malformed TSRX at byte \d+: expected a valid dynamic JSX tag expression$/u;
+const UNCLOSED_TAG_MESSAGE = /^Unclosed tag '<[^'\r\n]*>'\. Expected '<\/[^'\r\n]*>' before end of template\.$/u;
+const UNCLOSED_TAG_CODE = "tsrx-unclosed-tag";
 const IDENTIFIER_START = /[$_\p{ID_Start}]/u;
 const IDENTIFIER_CONTINUE = /[$_\u200c\u200d\p{ID_Continue}]/u;
 const WHITESPACE = /\s/u;
@@ -174,13 +177,44 @@ function compatibleDiagnosticSpan(error, source) {
 	};
 }
 function compatibleDiagnosticMessage(error) {
-	const message = typeof error?.message === "string" ? error.message : String(error);
-	return DYNAMIC_TAG_CANDIDATE_MESSAGE.test(message) ? DYNAMIC_TAG_REFERENCE_MESSAGE : message;
+	return typeof error?.message === "string" ? error.message : String(error);
+}
+function isDynamicTagNotExpression(error) {
+	return typeof error?.message === "string" && DYNAMIC_TAG_NOT_EXPRESSION_MESSAGE.test(error.message);
+}
+function dynamicTagNotExpressionError(error, positionAt) {
+	const { start, end } = primarySpan(error);
+	const loc = positionAt(start);
+	const raised = /* @__PURE__ */ new SyntaxError(`${DYNAMIC_TAG_REFERENCE_MESSAGE} (${loc.line}:${loc.column})`);
+	raised.pos = start;
+	raised.loc = loc;
+	raised.raisedAt = end;
+	return raised;
+}
+function isUnclosedTag(error) {
+	return typeof error?.message === "string" && UNCLOSED_TAG_MESSAGE.test(error.message);
+}
+function acornRaise(message, start, positionAt) {
+	const loc = positionAt(start);
+	const raised = /* @__PURE__ */ new SyntaxError(`${message} (${loc.line}:${loc.column})`);
+	raised.pos = start;
+	raised.loc = loc;
+	raised.raisedAt = start;
+	return raised;
+}
+function unclosedTagFailure(error, collecting, positionAt, source) {
+	if (collecting && typeof source === "string") return acornRaise("'}' expected.", source.length, positionAt);
+	return acornRaise(error.message, primarySpan(error).start ?? 0, positionAt);
+}
+function compatibleDiagnosticCode(error, message) {
+	if (typeof error?.code === "string") return error.code;
+	if (UNCLOSED_TAG_MESSAGE.test(message)) return UNCLOSED_TAG_CODE;
+	return message === DYNAMIC_TAG_REFERENCE_MESSAGE ? DYNAMIC_TAG_EXPRESSION_CODE : void 0;
 }
 function toCompileError(error, filename, positionAt, type, source) {
 	const translated = new SyntaxError(compatibleDiagnosticMessage(error));
 	const { start, end } = compatibleDiagnosticSpan(error, source);
-	translated.code = typeof error?.code === "string" ? error.code : void 0;
+	translated.code = compatibleDiagnosticCode(error, translated.message);
 	translated.pos = start;
 	translated.raisedAt = end;
 	translated.end = end;
@@ -823,13 +857,55 @@ function isClosedTemplateElement(value) {
 	if (value?.type === "JSXFragment") return value.closingFragment != null;
 	return (value?.type === "JSXElement" || value?.type === "JSXStyleElement") && value.openingElement?.selfClosing === false && value.closingElement != null;
 }
-function normalizeTemplateTextChildren(value, positionAt, trimInitialLayout) {
+function stripTextComments(text) {
+	if (!text.includes("/")) return null;
+	let output = "";
+	let changed = false;
+	let segmentStart = 0;
+	let index = 0;
+	let lineBlank = true;
+	while (index < text.length) {
+		const code = text.charCodeAt(index);
+		if (code === 47 && text.charCodeAt(index + 1) === 47 && lineBlank) {
+			output += text.slice(segmentStart, index);
+			index += 2;
+			while (index < text.length && text[index] !== "\n" && text[index] !== "\r") index += 1;
+			segmentStart = index;
+			changed = true;
+			continue;
+		}
+		if (code === 47 && text.charCodeAt(index + 1) === 42) {
+			output += text.slice(segmentStart, index);
+			const close = text.indexOf("*/", index + 2);
+			index = close === -1 ? text.length : close + 2;
+			segmentStart = index;
+			changed = true;
+			lineBlank = false;
+			continue;
+		}
+		if (code === 10 || code === 13) lineBlank = true;
+		else if (code !== 32 && code !== 9) lineBlank = false;
+		index += 1;
+	}
+	return changed ? output + text.slice(segmentStart) : null;
+}
+function stripAuthoredTextComments(child, source) {
+	if (typeof source !== "string" || typeof child.raw !== "string" || !Number.isInteger(child.start) || !Number.isInteger(child.end) || source.slice(child.start, child.end) !== child.raw) return;
+	const stripped = stripTextComments(child.raw);
+	if (stripped === null) return;
+	child.value = stripped;
+	child.raw = stripped;
+}
+const JSX_LAYOUT_WHITESPACE = /^[ \t\r\n]*$/u;
+function normalizeTemplateTextChildren(value, positionAt, trimInitialLayout, source) {
 	if (value.type !== "JSXElement" && value.type !== "JSXFragment" || !Array.isArray(value.children)) return;
 	let write = 0;
 	for (let read = 0; read < value.children.length; read += 1) {
 		const child = value.children[read];
 		if (child?.type === "JSXText" && typeof child.value === "string") {
-			if (child.value.trim() === "" && /[\r\n]/u.test(child.value)) continue;
+			stripAuthoredTextComments(child, source);
+			if (child.value === "") continue;
+			if (JSX_LAYOUT_WHITESPACE.test(child.value) && /[\r\n]/u.test(child.value)) continue;
 			const previous = write === 0 ? null : value.children[write - 1];
 			if (write === 0 && trimInitialLayout || isClosedTemplateElement(previous)) {
 				const leading = /^[ \t\r\n]*/u.exec(child.value)?.[0] ?? "";
@@ -933,7 +1009,7 @@ function materializeCompatibilityProgram(program, source, filename, loose, posit
 			const elementName = value.openingElement?.name?.name;
 			value.metadata.templateMode = value.type === "JSXStyleElement" || elementName === "script" || value.openingElement?.selfClosing === true ? "script" : "template";
 			templateElements.push(value);
-			normalizeTemplateTextChildren(value, positionAt, insideScriptSetup);
+			normalizeTemplateTextChildren(value, positionAt, insideScriptSetup, source);
 		}
 		if (value.type === "TSModuleDeclaration") {
 			value.metadata ??= { path: [] };
@@ -1073,6 +1149,660 @@ function undefinedLocalExportDiagnostics(program) {
 	}
 	return diagnostics;
 }
+const SCOPE_TOP = 1;
+const SCOPE_FUNCTION = 2;
+const SCOPE_VAR = 4;
+const SCOPE_SIMPLE_CATCH = 8;
+const BIND_VAR = 1;
+const BIND_LEXICAL = 2;
+const SCOPE_SKIPPED_KEYS = /* @__PURE__ */ new Set([
+	"type",
+	"start",
+	"end",
+	"loc",
+	"range",
+	"metadata",
+	"typeAnnotation",
+	"returnType",
+	"typeParameters",
+	"typeArguments",
+	"superTypeArguments",
+	"superTypeParameters",
+	"implements",
+	"leadingComments",
+	"trailingComments",
+	"innerComments",
+	"comments",
+	"css",
+	"content"
+]);
+const SCOPE_TS_EXPRESSION_WRAPPERS = /* @__PURE__ */ new Set([
+	"TSAsExpression",
+	"TSSatisfiesExpression",
+	"TSNonNullExpression",
+	"TSTypeAssertion",
+	"TSInstantiationExpression",
+	"TSExportAssignment"
+]);
+const SCOPE_CHILD_KEYS = /* @__PURE__ */ new Map([
+	["Identifier", []],
+	["Literal", []],
+	["JSXText", []],
+	["JSXIdentifier", []],
+	["JSXNamespacedName", []],
+	["JSXMemberExpression", []],
+	["TemplateElement", []],
+	["ThisExpression", []],
+	["Super", []],
+	["PrivateIdentifier", []],
+	["JSXEmptyExpression", []],
+	["JSXClosingElement", []],
+	["JSXOpeningFragment", []],
+	["JSXClosingFragment", []],
+	["EmptyStatement", []],
+	["DebuggerStatement", []],
+	["BreakStatement", []],
+	["ContinueStatement", []],
+	["MetaProperty", []],
+	["ExpressionStatement", ["expression"]],
+	["ReturnStatement", ["argument"]],
+	["ThrowStatement", ["argument"]],
+	["IfStatement", [
+		"test",
+		"consequent",
+		"alternate"
+	]],
+	["WhileStatement", ["test", "body"]],
+	["DoWhileStatement", ["body", "test"]],
+	["LabeledStatement", ["body"]],
+	["CallExpression", ["callee", "arguments"]],
+	["NewExpression", ["callee", "arguments"]],
+	["MemberExpression", ["object", "property"]],
+	["ChainExpression", ["expression"]],
+	["ParenthesizedExpression", ["expression"]],
+	["SequenceExpression", ["expressions"]],
+	["BinaryExpression", ["left", "right"]],
+	["LogicalExpression", ["left", "right"]],
+	["AssignmentExpression", ["left", "right"]],
+	["ConditionalExpression", [
+		"test",
+		"consequent",
+		"alternate"
+	]],
+	["UnaryExpression", ["argument"]],
+	["UpdateExpression", ["argument"]],
+	["AwaitExpression", ["argument"]],
+	["YieldExpression", ["argument"]],
+	["SpreadElement", ["argument"]],
+	["ObjectExpression", ["properties"]],
+	["ArrayExpression", ["elements"]],
+	["Property", ["key", "value"]],
+	["TemplateLiteral", ["expressions"]],
+	["TaggedTemplateExpression", ["tag", "quasi"]],
+	["ImportExpression", ["source", "options"]],
+	["JSXElement", ["openingElement", "children"]],
+	["JSXFragment", ["children"]],
+	["JSXOpeningElement", ["name", "attributes"]],
+	["JSXAttribute", ["value"]],
+	["JSXExpressionContainer", ["expression"]],
+	["JSXSpreadAttribute", ["argument"]],
+	["JSXSpreadChild", ["expression"]],
+	["JSXIfExpression", [
+		"test",
+		"consequent",
+		"alternate"
+	]],
+	["MethodDefinition", [
+		"decorators",
+		"key",
+		"value"
+	]],
+	["PropertyDefinition", [
+		"decorators",
+		"key",
+		"value"
+	]],
+	["AccessorProperty", [
+		"decorators",
+		"key",
+		"value"
+	]],
+	["Decorator", ["expression"]],
+	["ExportDefaultDeclaration", ["declaration"]],
+	["ExportAllDeclaration", []]
+]);
+const DECLARED_LEXICAL = 1;
+const DECLARED_VAR = 2;
+const DECLARED_TYPE = 4;
+const DECLARED_ENUM = 8;
+const DECLARED_EXPORT_ONLY = 16;
+function scopeHas(scope, name, kind) {
+	return scope.names !== null && ((scope.names.get(name) ?? 0) & kind) !== 0;
+}
+function scopeAdd(scope, name, kind) {
+	scope.names ??= /* @__PURE__ */ new Map();
+	scope.names.set(name, (scope.names.get(name) ?? 0) | kind);
+}
+function scopeDiagnostic(message, start, end, fatal) {
+	return {
+		severity: "Error",
+		message,
+		labels: [{
+			start,
+			end,
+			message: ""
+		}],
+		helpMessage: null,
+		codeframe: null,
+		compatFatal: fatal
+	};
+}
+function nextTokenEnd(source, offset) {
+	let index = offset;
+	while (index < source.length && /\s/u.test(source[index])) index += 1;
+	return Math.min(index + 1, source.length);
+}
+function scopeDiagnostics(program, source) {
+	if (!Array.isArray(program?.body)) return [];
+	const diagnostics = [];
+	const scopes = [];
+	const undefinedExports = /* @__PURE__ */ new Map();
+	const enter = (flags) => {
+		scopes.push({
+			flags,
+			names: null,
+			firstLexical: void 0
+		});
+	};
+	const exit = () => {
+		scopes.pop();
+	};
+	const current = () => scopes[scopes.length - 1];
+	const redeclared = (name, start) => {
+		diagnostics.push(scopeDiagnostic(`Identifier '${name}' has already been declared`, start, start + 1, {
+			start,
+			end: start + 1
+		}));
+	};
+	const pushLexical = (scope, name) => {
+		scope.firstLexical ??= name;
+		scopeAdd(scope, name, DECLARED_LEXICAL);
+	};
+	const declareName = (name, binding, start) => {
+		const scope = current();
+		if (binding === BIND_LEXICAL) {
+			if (scopeHas(scope, name, 3)) redeclared(name, start);
+			pushLexical(scope, name);
+			if (scope.flags & SCOPE_TOP) undefinedExports.delete(name);
+			return;
+		}
+		let reported = false;
+		for (let index = scopes.length - 1; index >= 0; index -= 1) {
+			const candidate = scopes[index];
+			if (!reported && scopeHas(candidate, name, DECLARED_LEXICAL) && !(candidate.flags & SCOPE_SIMPLE_CATCH && candidate.firstLexical === name)) {
+				redeclared(name, start);
+				reported = true;
+			}
+			scopeAdd(candidate, name, DECLARED_VAR);
+			if (candidate.flags & SCOPE_TOP) undefinedExports.delete(name);
+			if (candidate.flags & SCOPE_VAR) break;
+		}
+	};
+	const patternIdentifiers = (pattern, out) => {
+		if (pattern === null || typeof pattern !== "object") return out;
+		switch (pattern.type) {
+			case "Identifier":
+				out.push(pattern);
+				break;
+			case "RestElement":
+				patternIdentifiers(pattern.argument, out);
+				break;
+			case "AssignmentPattern":
+				patternIdentifiers(pattern.left, out);
+				break;
+			case "ArrayPattern":
+				for (const element of pattern.elements ?? []) patternIdentifiers(element, out);
+				break;
+			case "ObjectPattern":
+				for (const property of pattern.properties ?? []) patternIdentifiers(property?.type === "RestElement" ? property.argument : property?.value, out);
+				break;
+			case "TSParameterProperty": patternIdentifiers(pattern.parameter, out);
+		}
+		return out;
+	};
+	const patternExpressions = (pattern, out) => {
+		if (pattern === null || typeof pattern !== "object") return out;
+		switch (pattern.type) {
+			case "Identifier":
+				out.push(pattern.decorators);
+				break;
+			case "RestElement":
+				patternExpressions(pattern.argument, out);
+				break;
+			case "AssignmentPattern":
+				patternExpressions(pattern.left, out);
+				out.push(pattern.right);
+				break;
+			case "ArrayPattern":
+				for (const element of pattern.elements ?? []) patternExpressions(element, out);
+				break;
+			case "ObjectPattern":
+				for (const property of pattern.properties ?? []) if (property?.type === "RestElement") patternExpressions(property.argument, out);
+				else {
+					if (property?.computed) out.push(property.key);
+					patternExpressions(property?.value, out);
+				}
+				break;
+			case "TSParameterProperty":
+				out.push(pattern.decorators);
+				patternExpressions(pattern.parameter, out);
+				break;
+			default: out.push(pattern);
+		}
+		return out;
+	};
+	const declareIdentifiers = (pattern, binding) => {
+		for (const identifier of patternIdentifiers(pattern, [])) declareName(identifier.name, binding, identifier.start);
+	};
+	const declarePattern = (pattern, binding, out) => {
+		patternExpressions(pattern, out);
+		out.push(() => declareIdentifiers(pattern, binding));
+	};
+	const checkParams = (params) => {
+		const first = /* @__PURE__ */ new Map();
+		const reported = /* @__PURE__ */ new Set();
+		for (const param of params ?? []) for (const identifier of patternIdentifiers(param, [])) {
+			const { name, start } = identifier;
+			if (name === "this") continue;
+			if (first.has(name)) {
+				if (!reported.has(name)) {
+					const firstStart = first.get(name);
+					diagnostics.push(scopeDiagnostic("Argument name clash", firstStart, firstStart + name.length, null));
+					reported.add(name);
+				}
+				const end = Number.isInteger(identifier.end) ? identifier.end : start + name.length;
+				diagnostics.push(scopeDiagnostic("Argument name clash", start, end, {
+					start,
+					end: start + 1
+				}));
+				continue;
+			}
+			first.set(name, start);
+			declareName(name, BIND_VAR, start);
+		}
+	};
+	const declareTopLevelName = (scope, name, kind) => {
+		scopeAdd(scope, name, kind);
+		if (scope.flags & SCOPE_TOP) undefinedExports.delete(name);
+	};
+	const scopeDeclares = (scope, name) => scopeHas(scope, name, 23);
+	const tasks = [];
+	const enterBlock = () => enter(0);
+	const enterVarScope = () => enter(SCOPE_VAR);
+	const enterFunction = () => enter(6);
+	const enterSimpleCatch = () => enter(SCOPE_SIMPLE_CATCH);
+	const schedule = (sequence) => {
+		for (let index = sequence.length - 1; index >= 0; index -= 1) {
+			const task = sequence[index];
+			if (task !== null && (typeof task === "object" || typeof task === "function")) tasks.push(task);
+		}
+	};
+	const bodyStatements = (body) => body?.type === "BlockStatement" ? body.body : body;
+	const visitFunction = (node, declaration) => {
+		const outer = current();
+		const body = node.body;
+		const sequence = [enterFunction];
+		for (const param of node.params ?? []) patternExpressions(param, sequence);
+		if (body?.type === "JSXCodeBlock") sequence.push(body, () => checkParams(node.params));
+		else if (body != null) sequence.push(() => checkParams(node.params), bodyStatements(body));
+		sequence.push(exit);
+		if (declaration && node.id?.type === "Identifier") {
+			const id = node.id;
+			sequence.push(() => {
+				if (body != null) declareName(id.name, outer.flags & SCOPE_FUNCTION ? BIND_VAR : BIND_LEXICAL, id.start);
+				else if (node.declare && outer.flags & SCOPE_TOP) {
+					scopeAdd(outer, id.name, DECLARED_EXPORT_ONLY);
+					undefinedExports.delete(id.name);
+				}
+			});
+		}
+		schedule(sequence);
+	};
+	const visitClass = (node, declaration) => {
+		const sequence = [node.decorators];
+		if (declaration && node.id?.type === "Identifier") {
+			const id = node.id;
+			sequence.push(() => declareName(id.name, BIND_LEXICAL, id.start));
+		}
+		sequence.push(node.superClass);
+		for (const member of node.body?.body ?? []) if (member?.type === "StaticBlock") sequence.push(enterVarScope, member.body, exit);
+		else sequence.push(member);
+		schedule(sequence);
+	};
+	const visitCatch = (clause) => {
+		const param = clause.param;
+		const sequence = [];
+		if (param?.type === "Identifier") sequence.push(enterSimpleCatch, () => pushLexical(current(), param.name));
+		else {
+			sequence.push(enterBlock);
+			if (param != null) declarePattern(param, BIND_LEXICAL, sequence);
+		}
+		if (clause.resetParam != null) declarePattern(clause.resetParam, BIND_LEXICAL, sequence);
+		sequence.push(bodyStatements(clause.body), exit);
+		schedule(sequence);
+	};
+	const checkLocalExports = (node) => {
+		for (const specifier of node.specifiers ?? []) {
+			const local = specifier?.local;
+			if (local?.type !== "Identifier") continue;
+			if (scopes.some((scope) => scopeDeclares(scope, local.name))) undefinedExports.delete(local.name);
+			else undefinedExports.set(local.name, local);
+		}
+	};
+	const step = (node) => {
+		if (Array.isArray(node)) {
+			for (let index = node.length - 1; index >= 0; index -= 1) {
+				const child = node[index];
+				if (child !== null && typeof child === "object") tasks.push(child);
+			}
+			return;
+		}
+		const childKeys = SCOPE_CHILD_KEYS.get(node.type);
+		if (childKeys !== void 0) {
+			for (let index = childKeys.length - 1; index >= 0; index -= 1) {
+				const child = node[childKeys[index]];
+				if (child !== null && typeof child === "object") tasks.push(child);
+			}
+			return;
+		}
+		switch (node.type) {
+			case "VariableDeclaration": {
+				const binding = node.kind === "var" ? BIND_VAR : BIND_LEXICAL;
+				const sequence = [];
+				for (const declarator of node.declarations ?? []) {
+					declarePattern(declarator?.id, binding, sequence);
+					sequence.push(declarator?.init);
+				}
+				schedule(sequence);
+				return;
+			}
+			case "FunctionDeclaration":
+			case "TSDeclareFunction":
+				visitFunction(node, true);
+				return;
+			case "FunctionExpression":
+			case "ArrowFunctionExpression":
+			case "TSEmptyBodyFunctionExpression":
+				visitFunction(node, false);
+				return;
+			case "ClassDeclaration":
+				visitClass(node, true);
+				return;
+			case "ClassExpression":
+				visitClass(node, false);
+				return;
+			case "BlockStatement":
+				schedule([
+					enterBlock,
+					node.body,
+					exit
+				]);
+				return;
+			case "StaticBlock":
+				schedule([
+					enterVarScope,
+					node.body,
+					exit
+				]);
+				return;
+			case "CatchClause":
+				visitCatch(node);
+				return;
+			case "TryStatement":
+			case "JSXTryExpression":
+				schedule([
+					node.block,
+					node.pending,
+					node.handler,
+					node.finalizer
+				]);
+				return;
+			case "ForStatement":
+				schedule([
+					enterBlock,
+					node.init,
+					node.test,
+					node.update,
+					node.body,
+					exit
+				]);
+				return;
+			case "ForInStatement":
+			case "ForOfStatement":
+			case "JSXForExpression":
+				schedule([
+					enterBlock,
+					node.left,
+					node.right,
+					node.index,
+					node.key,
+					node.body,
+					exit,
+					node.empty
+				]);
+				return;
+			case "SwitchStatement": {
+				const sequence = [node.discriminant, enterBlock];
+				for (const clause of node.cases ?? []) sequence.push(clause?.test, clause?.consequent);
+				sequence.push(exit);
+				schedule(sequence);
+				return;
+			}
+			case "JSXSwitchExpression": {
+				const sequence = [node.discriminant, enterBlock];
+				for (const clause of node.cases ?? []) sequence.push(clause?.test, enterBlock, clause?.consequent, exit);
+				sequence.push(exit);
+				schedule(sequence);
+				return;
+			}
+			case "JSXCodeBlock":
+				schedule([
+					enterBlock,
+					node.body,
+					node.render,
+					exit
+				]);
+				return;
+			case "ImportDeclaration":
+				for (const specifier of node.specifiers ?? []) {
+					const local = specifier?.local;
+					if (local?.type === "Identifier") declareName(local.name, BIND_LEXICAL, local.start);
+				}
+				return;
+			case "TSImportEqualsDeclaration":
+				if (node.id?.type === "Identifier") declareName(node.id.name, BIND_LEXICAL, node.id.start);
+				return;
+			case "ExportNamedDeclaration":
+				if (node.source == null && current().flags & SCOPE_TOP) schedule([node.declaration, () => checkLocalExports(node)]);
+				else schedule([node.declaration]);
+				return;
+			case "TSEnumDeclaration": {
+				const scope = current();
+				const name = node.id?.name;
+				if (typeof name !== "string" || scopeHas(scope, name, DECLARED_ENUM)) return;
+				declareName(name, BIND_LEXICAL, node.id.start);
+				scopeAdd(scope, name, DECLARED_ENUM);
+				return;
+			}
+			case "TSInterfaceDeclaration":
+				if (node.id?.type === "Identifier") declareTopLevelName(current(), node.id.name, DECLARED_TYPE);
+				return;
+			case "TSTypeAliasDeclaration": {
+				const scope = current();
+				const id = node.id;
+				if (id?.type !== "Identifier") return;
+				if (scopeHas(scope, id.name, DECLARED_TYPE)) diagnostics.push(scopeDiagnostic(`type '${id.name}' has already been declared.`, id.start, id.start + 1, {
+					start: id.start,
+					raisedAt: nextTokenEnd(source, id.end),
+					raise: true
+				}));
+				declareTopLevelName(scope, id.name, DECLARED_TYPE);
+				return;
+			}
+			case "TSModuleDeclaration": {
+				let id = node.id;
+				while (id?.type === "TSQualifiedName") id = id.left;
+				if (id?.type === "Identifier" && node.kind !== "global") declareTopLevelName(current(), id.name, DECLARED_EXPORT_ONLY);
+				let body = node.body;
+				while (body?.type === "TSModuleDeclaration") body = body.body;
+				if (body?.type === "TSModuleBlock") schedule([
+					enterVarScope,
+					body.body,
+					exit
+				]);
+				return;
+			}
+			case "JSXStyleElement":
+			case "StyleSheet": return;
+		}
+		if (typeof node.type === "string" && node.type.startsWith("TS")) {
+			if (SCOPE_TS_EXPRESSION_WRAPPERS.has(node.type)) schedule([node.expression]);
+			return;
+		}
+		const children = [];
+		for (const key in node) {
+			if (SCOPE_SKIPPED_KEYS.has(key)) continue;
+			children.push(node[key]);
+		}
+		schedule(children);
+	};
+	enter(5);
+	schedule([program.body]);
+	while (tasks.length > 0) {
+		const task = tasks.pop();
+		if (typeof task === "function") task();
+		else step(task);
+	}
+	exit();
+	for (const [name, local] of undefinedExports) diagnostics.push(scopeDiagnostic(`Export '${name}' is not defined`, local.start, local.start + 1, {
+		start: local.start,
+		raisedAt: source.length,
+		raise: true
+	}));
+	return diagnostics;
+}
+function scopeFatalError(error, filename, positionAt) {
+	const fatal = error.compatFatal;
+	if (fatal.raise) {
+		const loc = positionAt(fatal.start);
+		const raised = /* @__PURE__ */ new SyntaxError(`${error.message} (${loc.line}:${loc.column})`);
+		raised.pos = fatal.start;
+		raised.loc = loc;
+		raised.raisedAt = fatal.raisedAt;
+		return raised;
+	}
+	return toCompileError({
+		message: error.message,
+		labels: [{
+			start: fatal.start,
+			end: fatal.end
+		}]
+	}, filename, positionAt, "fatal", void 0);
+}
+function strictError(errors, filename, positionAt, source) {
+	const error = errors.find((candidate) => candidate?.compatFatal !== null) ?? errors[0];
+	if (error?.compatFatal != null) return scopeFatalError(error, filename, positionAt);
+	if (isUnclosedTag(error)) return acornRaise(error.message, primarySpan(error).start ?? 0, positionAt);
+	return toCompileError(error, filename, positionAt, "fatal", source);
+}
+function mergeBySourceOrder(left, right) {
+	if (left.length === 0) return right;
+	if (right.length === 0) return left;
+	const merged = [];
+	let l = 0;
+	let r = 0;
+	while (l < left.length && r < right.length) if (diagnosticStart(right[r]) < diagnosticStart(left[l])) merged.push(right[r++]);
+	else merged.push(left[l++]);
+	while (l < left.length) merged.push(left[l++]);
+	while (r < right.length) merged.push(right[r++]);
+	return merged;
+}
+const SCRIPT_END_TAG_START = /<\/script/giu;
+const SCRIPT_END_TAG_IN_BODY_CODE = "tsrx-script-end-tag-in-body";
+function mayHaveScriptEndTagInBody(source) {
+	if (typeof source !== "string") return false;
+	SCRIPT_END_TAG_START.lastIndex = 0;
+	let match;
+	while ((match = SCRIPT_END_TAG_START.exec(source)) !== null) {
+		if (match[0] !== "<\/script") return true;
+		if (!/^[\t\n\f\r ]*>/u.test(source.slice(match.index + match[0].length))) return true;
+	}
+	return false;
+}
+function scriptEndTagDiagnostics(program, source) {
+	if (!mayHaveScriptEndTagInBody(source)) return [];
+	const diagnostics = [];
+	const stack = [program];
+	while (stack.length > 0) {
+		const value = stack.pop();
+		if (value === null || typeof value !== "object") continue;
+		if (Array.isArray(value)) {
+			for (let index = value.length - 1; index >= 0; index -= 1) stack.push(value[index]);
+			continue;
+		}
+		if (value.type === "JSXElement" && value.openingElement?.name?.type === "JSXIdentifier" && value.openingElement.name.name === "script" && typeof value.content === "string" && Number.isInteger(value.openingElement.end)) {
+			const contentStart = value.openingElement.end;
+			SCRIPT_END_TAG_START.lastIndex = 0;
+			let match;
+			while ((match = SCRIPT_END_TAG_START.exec(value.content)) !== null) {
+				const written = match[0];
+				const start = contentStart + match.index;
+				diagnostics.push({
+					severity: "Error",
+					message: `'${written}' can end a script in HTML, so a '<script>' body can't contain it. Write '<\\/${written.slice(2)}' instead.`,
+					code: SCRIPT_END_TAG_IN_BODY_CODE,
+					labels: [{
+						start,
+						end: start + written.length,
+						message: ""
+					}],
+					helpMessage: null,
+					codeframe: null
+				});
+			}
+		}
+		for (const key in value) {
+			if (key === "loc" || key === "metadata" || key === "content") continue;
+			const child = value[key];
+			if (child !== null && typeof child === "object") stack.push(child);
+		}
+	}
+	return diagnostics;
+}
+function sortBySourceOrder(errors) {
+	const dynamic = [];
+	const others = [];
+	for (const [index, error] of errors.entries()) (error?.message === DYNAMIC_TAG_REFERENCE_MESSAGE ? dynamic : others).push({
+		error,
+		index
+	});
+	others.sort((left, right) => diagnosticStart(left.error) - diagnosticStart(right.error) || left.index - right.index);
+	const merged = [];
+	let next = 0;
+	for (const entry of dynamic) {
+		while (next < others.length && diagnosticStart(others[next].error) < diagnosticStart(entry.error)) {
+			merged.push(others[next].error);
+			next += 1;
+		}
+		merged.push(entry.error);
+	}
+	for (; next < others.length; next += 1) merged.push(others[next].error);
+	return merged;
+}
+function diagnosticStart(error) {
+	const { start } = primarySpan(error);
+	return Number.isInteger(start) ? start : Number.POSITIVE_INFINITY;
+}
 function isEventAttribute(name) {
 	return name.startsWith("on") && name.length > 2 && name[2] === name[2].toUpperCase();
 }
@@ -1119,6 +1849,8 @@ function createTsrxCoreCompat(parser) {
 					result = recovered;
 				} else {
 					if (isOperationalError(error) || !isSyntaxErrorLike(error)) throw error;
+					if (isDynamicTagNotExpression(error)) throw dynamicTagNotExpressionError(error, positions());
+					if (isUnclosedTag(error)) throw unclosedTagFailure(error, collecting, positions(), source);
 					const translated = toCompileError(error, resolvedFilename, positions(), "fatal", source);
 					if (collecting && Array.isArray(options?.errors)) options.errors.push(toCompileError(error, resolvedFilename, positions(), "usage", source));
 					throw translated;
@@ -1131,6 +1863,12 @@ function createTsrxCoreCompat(parser) {
 					selectedParserOptions = retry.options;
 				}
 			} catch {}
+			if (parserResultProgram(result) === null) {
+				const notExpression = parserResultErrors(result).find(isDynamicTagNotExpression);
+				if (notExpression !== void 0) throw dynamicTagNotExpressionError(notExpression, positions());
+				const unclosed = parserResultErrors(result)[0];
+				if (isUnclosedTag(unclosed)) throw unclosedTagFailure(unclosed, collecting, positions(), source);
+			}
 			let program;
 			let comments;
 			let nativeErrors;
@@ -1159,15 +1897,29 @@ function createTsrxCoreCompat(parser) {
 					const compatibilityErrors = undefinedLocalExportDiagnostics(program);
 					if (compatibilityErrors.length > 0) nativeErrors = [...nativeErrors, ...compatibilityErrors];
 				}
+				if (nativeErrors.length > 1 && nativeErrors.some((error) => error?.message === DYNAMIC_TAG_REFERENCE_MESSAGE)) nativeErrors = sortBySourceOrder(nativeErrors);
+				if (program !== null) {
+					const scriptErrors = scriptEndTagDiagnostics(program, source);
+					if (scriptErrors.length > 0) nativeErrors = sortBySourceOrder([...nativeErrors, ...scriptErrors]);
+				}
+				if (program !== null && (selectedParserOptions === PARSER_OPTIONS || selectedParserOptions === EAGER_PARSER_OPTIONS)) {
+					const scopeErrors = scopeDiagnostics(program, source);
+					if (scopeErrors.length > 0) {
+						const exportErrors = scopeErrors.filter((error) => error.message.startsWith("Export '"));
+						const declarationErrors = scopeErrors.filter((error) => !error.message.startsWith("Export '"));
+						nativeErrors = [...mergeBySourceOrder(nativeErrors, declarationErrors), ...exportErrors];
+					}
+				}
 				comments = wantsComments ? result?.comments ?? [] : [];
 			} catch (error) {
 				if (isOperationalError(error) || !isSyntaxErrorLike(error)) throw error;
+				if (isDynamicTagNotExpression(error)) throw dynamicTagNotExpressionError(error, positions());
 				const translated = toCompileError(error, resolvedFilename, positions(), "fatal", source);
 				if (collecting && Array.isArray(options?.errors)) options.errors.push(toCompileError(error, resolvedFilename, positions(), "usage", source));
 				throw translated;
 			}
 			if (nativeErrors.length > 0) {
-				if (!collecting) throw toCompileError(nativeErrors[0], resolvedFilename, positions(), "fatal", source);
+				if (!collecting) throw strictError(nativeErrors, resolvedFilename, positions(), source);
 				if (Array.isArray(options?.errors)) for (const error of nativeErrors) options.errors.push(toCompileError(error, resolvedFilename, positions(), "usage", source));
 			}
 			if (program === null) {

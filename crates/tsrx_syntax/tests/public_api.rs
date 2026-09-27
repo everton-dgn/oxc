@@ -671,3 +671,44 @@ fn unicode_identifier_suffixes_do_not_form_tsrx_controls() {
         );
     }
 }
+
+#[test]
+fn jsx_text_comments_are_scanned_before_tags_and_braces() {
+    // `@tsrx/core` 0.5: `/* ... */` is a comment anywhere in JSX text, and `//` where only
+    // whitespace precedes it on its line or in its run of text, so `a // b` is text.
+    let source = "export function App() @{\n\t<p>a /* { */ b // c\n\t\t// <b>x</b>\n\t\t{a}// d\n\t\t</p>\n}";
+    let overlay = tsrx_syntax::scan_for_parser(source).expect("scan");
+    let comments = overlay
+        .jsx_text_comments()
+        .iter()
+        .map(|span| &source[span.start as usize..span.end as usize])
+        .collect::<Vec<_>>();
+    assert_eq!(comments, ["/* { */", "// <b>x</b>", "// d"]);
+    assert!(overlay.implicit_closes().is_empty());
+
+    // A comment that swallows a closing tag leaves its element to end at the `}` that closes
+    // the template, which the parse reports as unclosed.
+    let source = "export function App() @{\n\t<div><p>// c</p></div>\n}";
+    let overlay = tsrx_syntax::scan_for_parser(source).expect("scan");
+    let brace = u32::try_from(source.rfind('}').expect("brace")).expect("offset");
+    let closes = overlay
+        .implicit_closes()
+        .iter()
+        .map(|close| (close.offset, close.message(source)))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        closes,
+        [
+            (brace, "Unclosed tag '<p>'. Expected '</p>' before end of template.".to_owned()),
+            (brace, "Unclosed tag '<div>'. Expected '</div>' before end of template.".to_owned()),
+        ]
+    );
+    let error = tsrx_syntax::project_for_lint(source, &overlay).expect_err("unclosed");
+    assert_eq!(error.byte_offset(), Some(brace));
+
+    // A block comment with no end runs to the end of the source.
+    let source = "export function App() @{\n\t<p>a /* open</p>\n}";
+    let error = tsrx_syntax::scan_for_parser(source).expect_err("unterminated");
+    assert_eq!(error.to_string(), "Unclosed tag '<p>'. Expected '</p>' before end of template.");
+    assert_eq!(error.byte_offset(), Some(u32::try_from(source.len()).expect("offset")));
+}

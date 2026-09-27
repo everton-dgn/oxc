@@ -139,7 +139,14 @@ pub(crate) fn reconstruct_projected(
         &mut starts,
         &mut list_removals,
     )?;
-    normalize_template_layout_text(tape, &object_index.layout_containers, &mut list_removals)?;
+    normalize_template_layout_text(
+        tape,
+        authored,
+        segments,
+        overlay.jsx_text_comments,
+        &object_index.layout_containers,
+        &mut list_removals,
+    )?;
     tape.remove_list_values(
         &list_removals.iter().map(|removal| (removal.list, removal.entry)).collect::<Vec<_>>(),
     )?;
