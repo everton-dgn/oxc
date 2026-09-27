@@ -220,6 +220,54 @@ test("native LSP underlines what @tsrx/core reports without failing the file", a
   }
 });
 
+// Issue #123: a nested dynamic tag or a control block inside a dynamic tag
+// expression failed the whole file in the editor, though core only reports the
+// expression.
+test("native LSP underlines a dynamic tag expression that holds nested TSRX", async () => {
+  const uri = pathToFileUri(join(workspace, "NestedDynamic.tsrx"));
+  const source =
+    "export function View(props) @{\n" +
+    "  var total = 0;\n" +
+    "  <{c ? B : <{T} />} />\n" +
+    "  <{@if(ok){Tag}@else{Fallback}}>{total}</{@if(ok){Tag}@else{Fallback}}>\n" +
+    "}\n";
+  const client = new LspClient(server, { args: SERVER_ARGUMENTS, cwd: workspace });
+  try {
+    await client.initialize(pathToFileUri(workspace));
+    client.notify("textDocument/didOpen", {
+      textDocument: { uri, languageId: "markless-tsrx", version: 1, text: source },
+    });
+    const published = await client.waitFor(
+      (message) =>
+        message.method === "textDocument/publishDiagnostics" && message.params.uri === uri,
+      5000,
+      "nested dynamic tag diagnostics",
+    );
+    const rangeOf = (text) => {
+      const start = source.indexOf(text);
+      return {
+        start: editorPositionOf(source, start),
+        end: editorPositionOf(source, start + text.length),
+      };
+    };
+    const reports = published.params.diagnostics
+      .filter((diagnostic) => diagnostic.code === "tsrx-dynamic-tag-expression")
+      .map(({ range }) => range);
+    assert.deepEqual(reports, [
+      rangeOf("c ? B : <{T} />"),
+      rangeOf("@if(ok){Tag}@else{Fallback}"),
+    ]);
+    assert.ok(
+      published.params.diagnostics.some((diagnostic) => diagnostic.code === "no-var"),
+      "the file's own rules still report",
+    );
+    client.notify("textDocument/didClose", { textDocument: { uri } });
+    await client.close();
+  } finally {
+    client.terminate();
+  }
+});
+
 // A `jsPlugins` config used to take every diagnostic away from every `.tsrx` file
 // in the editor, silently. The command line strips `jsPlugins` before it reaches
 // the native engine, because the `oxlint` wrapper hosts those plugins itself over

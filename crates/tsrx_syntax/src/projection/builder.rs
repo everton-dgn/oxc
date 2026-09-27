@@ -74,6 +74,11 @@ struct Builder<'a> {
     cursor: usize,
     /// Next unwritten entry of `overlay.jsx_text_comments`.
     text_comment: usize,
+    /// The last dynamic tag expression or closing tag written as a whole. The overlay entries
+    /// nested inside it were written with it, so they are skipped.
+    consumed: ByteSpan,
+    /// Scaffold ordinal of each dynamic tag. A tag nested in another tag's expression has none.
+    dynamic_ordinals: Vec<u32>,
 }
 
 impl<'a> Builder<'a> {
@@ -110,6 +115,8 @@ impl<'a> Builder<'a> {
             type_semantic,
             cursor: 0,
             text_comment: 0,
+            consumed: ByteSpan::default(),
+            dynamic_ordinals: Vec::new(),
         }
     }
 
@@ -571,7 +578,9 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    fn embedded(&mut self, token_index: u32) -> Result<(), ProjectionError> {
+    /// `next` is where the next overlay action starts, to tell whether a dynamic tag expression
+    /// holds nested TSRX.
+    fn embedded(&mut self, token_index: u32, next: Option<u32>) -> Result<(), ProjectionError> {
         let token = self.overlay.embedded_tokens[token_index as usize];
         let span_start = token.span.start as usize;
         let span_end = token.span.end as usize;
@@ -590,16 +599,26 @@ impl<'a> Builder<'a> {
                 {
                     return Err(ProjectionError::SourceChanged { offset: token.span.start });
                 }
-                write!(
-                    self.output,
-                    "<{}D{} {}A{}_={{",
-                    self.prefix, token.owner, self.prefix, token.owner
-                )
-                .expect("writing to a String cannot fail");
+                let ordinal = self.dynamic_ordinal(token.owner)?;
+                write!(self.output, "<{}D{ordinal} {}A{ordinal}_={{", self.prefix, self.prefix)
+                    .expect("writing to a String cannot fail");
+                // A nested dynamic tag, control block, or template has no TSX form inside the
+                // expression, and an expression holding one is never an allowed tag form.
+                let nested = next.is_some_and(|start| start < tag.expression.end)
+                    || self
+                        .overlay
+                        .dynamic_tags
+                        .get(token.owner as usize + 1)
+                        .is_some_and(|inner| inner.opening.start < tag.expression.end);
                 self.cursor = tag.expression.start as usize;
-                self.copy_original_with_fixability(tag.expression, tag.self_closing)?;
-                self.cursor = tag.expression.end as usize;
-                write!(self.output, "}} {}Z{}_={{null}}", self.prefix, token.owner)
+                if nested && self.record_segments {
+                    self.placeholder(tag.expression)?;
+                } else {
+                    self.copy_original_with_fixability(tag.expression, tag.self_closing)?;
+                }
+                // Through the closing `}`, where an overlay entry nested in the expression ends.
+                self.consumed = ByteSpan::new(tag.expression.start, tag.expression.end + 1);
+                write!(self.output, "}} {}Z{ordinal}_={{null}}", self.prefix)
                     .expect("writing to a String cannot fail");
                 self.cursor = span_end;
             }
@@ -652,8 +671,10 @@ impl<'a> Builder<'a> {
                     }
                     self.output.push('}');
                 }
-                write!(self.output, "</{}D{}>", self.prefix, token.owner)
+                let ordinal = self.dynamic_ordinal(token.owner)?;
+                write!(self.output, "</{}D{ordinal}>", self.prefix)
                     .expect("writing to a String cannot fail");
+                self.consumed = token.span;
                 self.cursor = span_end;
             }
             EmbeddedKind::StyleContent => {
@@ -682,6 +703,46 @@ impl<'a> Builder<'a> {
                     .expect("writing to a String cannot fail");
                 self.cursor = span_end;
             }
+        }
+        Ok(())
+    }
+
+    fn dynamic_ordinal(&self, owner: u32) -> Result<u32, ProjectionError> {
+        self.dynamic_ordinals
+            .get(owner as usize)
+            .copied()
+            .filter(|&ordinal| ordinal != NONE)
+            .ok_or(ProjectionError::StructuralMismatch)
+    }
+
+    /// Writes an array literal as wide as the trimmed `span` in its place, mapped onto it and
+    /// never fixable, so the dynamic tag report lands on the authored expression.
+    fn placeholder(&mut self, span: ByteSpan) -> Result<(), ProjectionError> {
+        let text = self
+            .source
+            .get(span.start as usize..span.end as usize)
+            .ok_or(ProjectionError::SourceChanged { offset: span.start })?;
+        let start = span.start as usize + (text.len() - text.trim_start().len());
+        let width = text.trim().len();
+        if width < 2 {
+            return Err(ProjectionError::StructuralMismatch);
+        }
+        let projected = to_u32(self.output.len())?;
+        self.output.push('[');
+        self.output.extend(std::iter::repeat_n(' ', width - 2));
+        self.output.push(']');
+        self.segments.push(ProjectionSegment {
+            projected: ByteSpan::new(projected, to_u32(self.output.len())?),
+            original_start: to_u32(start)?,
+            fixable: false,
+        });
+        while self
+            .overlay
+            .jsx_text_comments
+            .get(self.text_comment)
+            .is_some_and(|comment| comment.start < span.end)
+        {
+            self.text_comment += 1;
         }
         Ok(())
     }
@@ -803,46 +864,33 @@ impl<'a> PendingActions<'a> {
 
     fn apply(&mut self, builder: &mut Builder<'_>, action: Action) -> Result<(), ProjectionError> {
         match action {
-            Action::TryEnd(node) => {
-                self.try_end += 1;
-                builder.try_end(node)
-            }
-            Action::ParserCodeBlockEnd(block) => {
-                self.code_block_end += 1;
-                builder.parser_code_block_end(block)
-            }
-            Action::WrapperEnd(node) => {
-                self.wrapper += 1;
-                builder.wrapper_end(node)
-            }
-            Action::WrapperStart(node) => {
-                self.wrapper += 1;
-                builder.wrapper_start(node)
-            }
-            Action::Token(token) => {
-                self.token += 1;
-                builder.token(token)
-            }
-            Action::Header { clause, ordinal } => {
-                self.header += 1;
-                builder.header(clause, ordinal)
-            }
-            Action::ForBody(clause) => {
-                self.header += 1;
-                builder.for_body(clause)
-            }
+            Action::TryEnd(_) => self.try_end += 1,
+            Action::ParserCodeBlockEnd(_) => self.code_block_end += 1,
+            Action::WrapperEnd(_) | Action::WrapperStart(_) => self.wrapper += 1,
+            Action::Token(_) => self.token += 1,
+            Action::Header { .. } | Action::ForBody(_) => self.header += 1,
+            Action::Embedded(_) => self.embedded += 1,
+            Action::ParserShorthand(_) => self.shorthand += 1,
+            Action::StatementBoundary(_) => self.statement_boundary += 1,
+        }
+        let (position, _) = action.key(self.overlay);
+        if builder.consumed.start <= position && position < builder.consumed.end {
+            return Ok(());
+        }
+        match action {
+            Action::TryEnd(node) => builder.try_end(node),
+            Action::ParserCodeBlockEnd(block) => builder.parser_code_block_end(block),
+            Action::WrapperEnd(node) => builder.wrapper_end(node),
+            Action::WrapperStart(node) => builder.wrapper_start(node),
+            Action::Token(token) => builder.token(token),
+            Action::Header { clause, ordinal } => builder.header(clause, ordinal),
+            Action::ForBody(clause) => builder.for_body(clause),
             Action::Embedded(token) => {
-                self.embedded += 1;
-                builder.embedded(token)
+                let next = self.next()?.map(|next| next.key(self.overlay).0);
+                builder.embedded(token, next)
             }
-            Action::ParserShorthand(attribute) => {
-                self.shorthand += 1;
-                builder.parser_shorthand(attribute)
-            }
-            Action::StatementBoundary(boundary) => {
-                self.statement_boundary += 1;
-                builder.statement_boundary(boundary)
-            }
+            Action::ParserShorthand(attribute) => builder.parser_shorthand(attribute),
+            Action::StatementBoundary(boundary) => builder.statement_boundary(boundary),
         }
     }
 }
@@ -887,6 +935,19 @@ pub(super) fn build_projection_with_purpose(
         record_segments,
         purpose == ProjectionPurpose::Types,
     );
+    // Only a tag with its own opening token is written, so the scaffolds are numbered densely.
+    let mut dynamic_offsets = Vec::new();
+    builder.dynamic_ordinals = vec![NONE; overlay.dynamic_tags.len()];
+    for token in &overlay.embedded_tokens {
+        if token.kind == EmbeddedKind::DynamicOpen {
+            let tag = overlay
+                .dynamic_tags
+                .get(token.owner as usize)
+                .ok_or(ProjectionError::StructuralMismatch)?;
+            builder.dynamic_ordinals[token.owner as usize] = to_u32(dynamic_offsets.len())?;
+            dynamic_offsets.push(tag.expression.start);
+        }
+    }
     let mut pending = PendingActions::new(
         overlay,
         &wrapper_actions,
@@ -904,11 +965,10 @@ pub(super) fn build_projection_with_purpose(
         .filter(|node| node.context != ControlContext::Statement || node.kind == ControlKind::Try)
         .map(|node| node.span)
         .collect();
-    if record_segments && !overlay.dynamic_tags.is_empty() {
+    if record_segments && !dynamic_offsets.is_empty() {
         mapped.dynamic_prefix = Some(prefix.clone());
-        mapped.dynamic_count = to_u32(overlay.dynamic_tags.len())?;
-        mapped.dynamic_offsets =
-            overlay.dynamic_tags.iter().map(|tag| tag.expression.start).collect();
+        mapped.dynamic_count = to_u32(dynamic_offsets.len())?;
+        mapped.dynamic_offsets = dynamic_offsets;
     }
     Ok(BuiltProjection { mapped, prefix, wrappers, headers, tries })
 }
