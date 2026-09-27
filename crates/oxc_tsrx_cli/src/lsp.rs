@@ -1089,8 +1089,8 @@ mod tests {
         let [diagnostic] = &output.diagnostics[..] else {
             panic!("one report: {:?}", output.diagnostics);
         };
-        assert_eq!(diagnostic.rule, "tsrx-dynamic-tag-expression");
-        assert_eq!(diagnostic.code, "tsrx-dynamic-tag-expression");
+        assert_eq!(diagnostic.rule, "TSRX2014");
+        assert_eq!(diagnostic.code, "TSRX2014");
         assert_eq!(diagnostic.severity, "error");
         let start = source.find("tag()").expect("the fixture holds the call");
         assert_eq!(diagnostic.labels[0].span.offset as usize, start);

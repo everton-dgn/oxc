@@ -185,16 +185,16 @@ test("native LSP underlines what @tsrx/core reports without failing the file", a
       };
     };
     const reports = published.params.diagnostics
-      .filter((diagnostic) => diagnostic.code.startsWith("tsrx-"))
+      .filter((diagnostic) => /^TSRX\d{4}$/u.test(diagnostic.code))
       .map(({ code, severity, range }) => ({ code, severity, range }))
       .sort((left, right) => left.range.start.line - right.range.start.line);
     assert.deepEqual(reports, [
-      { code: "tsrx-dynamic-tag-expression", severity: 1, range: rangeOf("getTag()") },
-      { code: "tsrx-dynamic-tag-expression", severity: 1, range: rangeOf("props.open ? A : B") },
-      { code: "tsrx-script-end-tag-in-body", severity: 1, range: rangeOf("</SCRIPT") },
+      { code: "TSRX2014", severity: 1, range: rangeOf("getTag()") },
+      { code: "TSRX2014", severity: 1, range: rangeOf("props.open ? A : B") },
+      { code: "TSRX1004", severity: 1, range: rangeOf("</SCRIPT") },
     ]);
     const script = published.params.diagnostics.find(
-      (diagnostic) => diagnostic.code === "tsrx-script-end-tag-in-body",
+      (diagnostic) => diagnostic.code === "TSRX1004",
     );
     assert.equal(
       script.message,
@@ -251,7 +251,7 @@ test("native LSP underlines a dynamic tag expression that holds nested TSRX", as
       };
     };
     const reports = published.params.diagnostics
-      .filter((diagnostic) => diagnostic.code === "tsrx-dynamic-tag-expression")
+      .filter((diagnostic) => diagnostic.code === "TSRX2014")
       .map(({ range }) => range);
     assert.deepEqual(reports, [
       rangeOf("c ? B : <{T} />"),

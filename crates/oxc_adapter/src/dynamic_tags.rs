@@ -10,7 +10,7 @@ use crate::DynamicTagContract;
 pub const DYNAMIC_TAG_EXPRESSION_MESSAGE: &str = "A dynamic tag expression must be an identifier, a member access such as `props.as` or `registry[name]`, or a string literal. Compute anything else before the element: `const Tag = c ? Child : Fallback;`, then `<{Tag} />`.";
 
 /// `@tsrx/core`'s diagnostic code for a dynamic tag expression that isn't one of the allowed forms.
-pub const DYNAMIC_TAG_EXPRESSION_CODE: &str = "tsrx-dynamic-tag-expression";
+pub const DYNAMIC_TAG_EXPRESSION_CODE: &str = "TSRX2014";
 
 /// The part of one dynamic tag expression that isn't an allowed form, in projected-source bytes.
 ///
