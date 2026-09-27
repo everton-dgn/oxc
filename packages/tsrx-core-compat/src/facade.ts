@@ -1531,6 +1531,632 @@ function undefinedLocalExportDiagnostics(program) {
   return diagnostics;
 }
 
+// `@tsrx/core` reports the scope errors acorn and acorn-typescript report while parsing a module:
+// a redeclared binding, a duplicate parameter, a redeclared type alias, and an exported name that
+// the module never declares. The native parser doesn't run a scope pass on a TSRX module (its
+// projection hides a template body's `var` from the component that owns it), so this pass replays
+// acorn's scope rules over the Program the native parser returns, with core's template scopes:
+// every `@{ }` code block, directive body, and `@switch` arm is a block scope, a `var` in any of
+// them belongs to the enclosing function, and a component's `@{ }` body is a block scope of its own
+// whose parameters are declared after the body, as core does. Diagnostics come back in core's
+// parse order; a strict parse throws the first one core throws, and `collect`/`loose` record them.
+const SCOPE_TOP = 1;
+const SCOPE_FUNCTION = 2;
+const SCOPE_VAR = 4;
+const SCOPE_SIMPLE_CATCH = 8;
+const BIND_VAR = 1;
+const BIND_LEXICAL = 2;
+const SCOPE_SKIPPED_KEYS = new Set([
+  "type",
+  "start",
+  "end",
+  "loc",
+  "range",
+  "metadata",
+  "typeAnnotation",
+  "returnType",
+  "typeParameters",
+  "typeArguments",
+  "superTypeArguments",
+  "superTypeParameters",
+  "implements",
+  "leadingComments",
+  "trailingComments",
+  "innerComments",
+  "comments",
+  "css",
+  "content",
+]);
+const SCOPE_TS_EXPRESSION_WRAPPERS = new Set([
+  "TSAsExpression",
+  "TSSatisfiesExpression",
+  "TSNonNullExpression",
+  "TSTypeAssertion",
+  "TSInstantiationExpression",
+  "TSExportAssignment",
+]);
+
+// The children that can hold a declaration or a function, for the node types most modules are
+// made of; any other node falls back to walking every child.
+const SCOPE_CHILD_KEYS = new Map<string, readonly string[]>([
+  ["Identifier", []],
+  ["Literal", []],
+  ["JSXText", []],
+  ["JSXIdentifier", []],
+  ["JSXNamespacedName", []],
+  ["JSXMemberExpression", []],
+  ["TemplateElement", []],
+  ["ThisExpression", []],
+  ["Super", []],
+  ["PrivateIdentifier", []],
+  ["JSXEmptyExpression", []],
+  ["JSXClosingElement", []],
+  ["JSXOpeningFragment", []],
+  ["JSXClosingFragment", []],
+  ["EmptyStatement", []],
+  ["DebuggerStatement", []],
+  ["BreakStatement", []],
+  ["ContinueStatement", []],
+  ["MetaProperty", []],
+  ["ExpressionStatement", ["expression"]],
+  ["ReturnStatement", ["argument"]],
+  ["ThrowStatement", ["argument"]],
+  ["IfStatement", ["test", "consequent", "alternate"]],
+  ["WhileStatement", ["test", "body"]],
+  ["DoWhileStatement", ["body", "test"]],
+  ["LabeledStatement", ["body"]],
+  ["CallExpression", ["callee", "arguments"]],
+  ["NewExpression", ["callee", "arguments"]],
+  ["MemberExpression", ["object", "property"]],
+  ["ChainExpression", ["expression"]],
+  ["ParenthesizedExpression", ["expression"]],
+  ["SequenceExpression", ["expressions"]],
+  ["BinaryExpression", ["left", "right"]],
+  ["LogicalExpression", ["left", "right"]],
+  ["AssignmentExpression", ["left", "right"]],
+  ["ConditionalExpression", ["test", "consequent", "alternate"]],
+  ["UnaryExpression", ["argument"]],
+  ["UpdateExpression", ["argument"]],
+  ["AwaitExpression", ["argument"]],
+  ["YieldExpression", ["argument"]],
+  ["SpreadElement", ["argument"]],
+  ["ObjectExpression", ["properties"]],
+  ["ArrayExpression", ["elements"]],
+  ["Property", ["key", "value"]],
+  ["TemplateLiteral", ["expressions"]],
+  ["TaggedTemplateExpression", ["tag", "quasi"]],
+  ["ImportExpression", ["source", "options"]],
+  ["JSXElement", ["openingElement", "children"]],
+  ["JSXFragment", ["children"]],
+  ["JSXOpeningElement", ["name", "attributes"]],
+  ["JSXAttribute", ["value"]],
+  ["JSXExpressionContainer", ["expression"]],
+  ["JSXSpreadAttribute", ["argument"]],
+  ["JSXSpreadChild", ["expression"]],
+  ["JSXIfExpression", ["test", "consequent", "alternate"]],
+  ["MethodDefinition", ["decorators", "key", "value"]],
+  ["PropertyDefinition", ["decorators", "key", "value"]],
+  ["AccessorProperty", ["decorators", "key", "value"]],
+  ["Decorator", ["expression"]],
+  ["ExportDefaultDeclaration", ["declaration"]],
+  ["ExportAllDeclaration", []],
+]);
+
+// What a scope declares under one name: acorn's `lexical` and `var` lists, and the ones
+// acorn-typescript keeps apart (`types`, `enums`, and `exportOnly` for namespaces and ambient
+// functions). A scope allocates its map on the first declaration.
+const DECLARED_LEXICAL = 1;
+const DECLARED_VAR = 2;
+const DECLARED_TYPE = 4;
+const DECLARED_ENUM = 8;
+const DECLARED_EXPORT_ONLY = 16;
+
+interface CompatScope {
+  flags: number;
+  names: Map<string, number> | null;
+  firstLexical: string | undefined;
+}
+
+function scopeHas(scope: CompatScope, name, kind) {
+  return scope.names !== null && ((scope.names.get(name) ?? 0) & kind) !== 0;
+}
+
+function scopeAdd(scope: CompatScope, name, kind) {
+  scope.names ??= new Map();
+  scope.names.set(name, (scope.names.get(name) ?? 0) | kind);
+}
+
+function scopeDiagnostic(message, start, end, fatal) {
+  return {
+    severity: "Error",
+    message,
+    labels: [{ start, end, message: "" }],
+    helpMessage: null,
+    codeframe: null,
+    compatFatal: fatal,
+  };
+}
+
+function nextTokenEnd(source, offset) {
+  let index = offset;
+  while (index < source.length && /\s/u.test(source[index])) index += 1;
+  return Math.min(index + 1, source.length);
+}
+
+function scopeDiagnostics(program, source) {
+  if (!Array.isArray(program?.body)) return [];
+  const diagnostics = [];
+  const scopes: CompatScope[] = [];
+  const undefinedExports = new Map();
+
+  const enter = (flags) => {
+    scopes.push({ flags, names: null, firstLexical: undefined });
+  };
+  const exit = () => {
+    scopes.pop();
+  };
+  const current = () => scopes[scopes.length - 1];
+  const redeclared = (name, start) => {
+    diagnostics.push(
+      scopeDiagnostic(`Identifier '${name}' has already been declared`, start, start + 1, {
+        start,
+        end: start + 1,
+      }),
+    );
+  };
+  const pushLexical = (scope, name) => {
+    scope.firstLexical ??= name;
+    scopeAdd(scope, name, DECLARED_LEXICAL);
+  };
+  const declareName = (name, binding, start) => {
+    const scope = current();
+    if (binding === BIND_LEXICAL) {
+      if (scopeHas(scope, name, DECLARED_LEXICAL | DECLARED_VAR)) redeclared(name, start);
+      pushLexical(scope, name);
+      if (scope.flags & SCOPE_TOP) undefinedExports.delete(name);
+      return;
+    }
+    let reported = false;
+    for (let index = scopes.length - 1; index >= 0; index -= 1) {
+      const candidate = scopes[index];
+      if (
+        !reported &&
+        scopeHas(candidate, name, DECLARED_LEXICAL) &&
+        !(candidate.flags & SCOPE_SIMPLE_CATCH && candidate.firstLexical === name)
+      ) {
+        redeclared(name, start);
+        reported = true;
+      }
+      scopeAdd(candidate, name, DECLARED_VAR);
+      if (candidate.flags & SCOPE_TOP) undefinedExports.delete(name);
+      if (candidate.flags & SCOPE_VAR) break;
+    }
+  };
+
+  // Bindings of a pattern, in source order. Acorn reads the expressions inside a pattern
+  // (defaults, computed keys) before it declares the bindings.
+  const patternIdentifiers = (pattern, out) => {
+    if (pattern === null || typeof pattern !== "object") return out;
+    switch (pattern.type) {
+      case "Identifier":
+        out.push(pattern);
+        break;
+      case "RestElement":
+        patternIdentifiers(pattern.argument, out);
+        break;
+      case "AssignmentPattern":
+        patternIdentifiers(pattern.left, out);
+        break;
+      case "ArrayPattern":
+        for (const element of pattern.elements ?? []) patternIdentifiers(element, out);
+        break;
+      case "ObjectPattern":
+        for (const property of pattern.properties ?? []) {
+          patternIdentifiers(
+            property?.type === "RestElement" ? property.argument : property?.value,
+            out,
+          );
+        }
+        break;
+      case "TSParameterProperty":
+        patternIdentifiers(pattern.parameter, out);
+        break;
+    }
+    return out;
+  };
+  const patternExpressions = (pattern, out) => {
+    if (pattern === null || typeof pattern !== "object") return out;
+    switch (pattern.type) {
+      case "Identifier":
+        out.push(pattern.decorators);
+        break;
+      case "RestElement":
+        patternExpressions(pattern.argument, out);
+        break;
+      case "AssignmentPattern":
+        patternExpressions(pattern.left, out);
+        out.push(pattern.right);
+        break;
+      case "ArrayPattern":
+        for (const element of pattern.elements ?? []) patternExpressions(element, out);
+        break;
+      case "ObjectPattern":
+        for (const property of pattern.properties ?? []) {
+          if (property?.type === "RestElement") {
+            patternExpressions(property.argument, out);
+          } else {
+            if (property?.computed) out.push(property.key);
+            patternExpressions(property?.value, out);
+          }
+        }
+        break;
+      case "TSParameterProperty":
+        out.push(pattern.decorators);
+        patternExpressions(pattern.parameter, out);
+        break;
+      default:
+        out.push(pattern);
+    }
+    return out;
+  };
+  const declareIdentifiers = (pattern, binding) => {
+    for (const identifier of patternIdentifiers(pattern, [])) {
+      declareName(identifier.name, binding, identifier.start);
+    }
+  };
+  const declarePattern = (pattern, binding, out) => {
+    patternExpressions(pattern, out);
+    out.push(() => declareIdentifiers(pattern, binding));
+  };
+
+  const checkParams = (params) => {
+    const first = new Map();
+    const reported = new Set();
+    for (const param of params ?? []) {
+      for (const identifier of patternIdentifiers(param, [])) {
+        const { name, start } = identifier;
+        if (name === "this") continue;
+        if (first.has(name)) {
+          if (!reported.has(name)) {
+            const firstStart = first.get(name);
+            diagnostics.push(
+              scopeDiagnostic("Argument name clash", firstStart, firstStart + name.length, null),
+            );
+            reported.add(name);
+          }
+          const end = Number.isInteger(identifier.end) ? identifier.end : start + name.length;
+          diagnostics.push(
+            scopeDiagnostic("Argument name clash", start, end, { start, end: start + 1 }),
+          );
+          continue;
+        }
+        first.set(name, start);
+        declareName(name, BIND_VAR, start);
+      }
+    }
+  };
+  const declareTopLevelName = (scope, name, kind) => {
+    scopeAdd(scope, name, kind);
+    if (scope.flags & SCOPE_TOP) undefinedExports.delete(name);
+  };
+  const scopeDeclares = (scope, name) =>
+    scopeHas(scope, name, DECLARED_LEXICAL | DECLARED_VAR | DECLARED_TYPE | DECLARED_EXPORT_ONLY);
+
+  // The walk keeps its own stack, so a deeply nested template can't overflow the call stack. A
+  // task is a node or array to visit, or an action (entering or leaving a scope, declaring a
+  // name) that has to run between two visits.
+  const tasks = [];
+  const enterBlock = () => enter(0);
+  const enterVarScope = () => enter(SCOPE_VAR);
+  const enterFunction = () => enter(SCOPE_FUNCTION | SCOPE_VAR);
+  const enterSimpleCatch = () => enter(SCOPE_SIMPLE_CATCH);
+  const schedule = (sequence) => {
+    for (let index = sequence.length - 1; index >= 0; index -= 1) {
+      const task = sequence[index];
+      if (task !== null && (typeof task === "object" || typeof task === "function")) {
+        tasks.push(task);
+      }
+    }
+  };
+  const bodyStatements = (body) => (body?.type === "BlockStatement" ? body.body : body);
+
+  // A signature without a body (an overload, `declare function`, an abstract method) declares
+  // nothing and checks no parameters, as in acorn-typescript.
+  const visitFunction = (node, declaration) => {
+    const outer = current();
+    const body = node.body;
+    const sequence: unknown[] = [enterFunction];
+    for (const param of node.params ?? []) patternExpressions(param, sequence);
+    if (body?.type === "JSXCodeBlock") {
+      sequence.push(body, () => checkParams(node.params));
+    } else if (body != null) {
+      sequence.push(() => checkParams(node.params), bodyStatements(body));
+    }
+    sequence.push(exit);
+    if (declaration && node.id?.type === "Identifier") {
+      const id = node.id;
+      sequence.push(() => {
+        if (body != null) {
+          declareName(id.name, outer.flags & SCOPE_FUNCTION ? BIND_VAR : BIND_LEXICAL, id.start);
+        } else if (node.declare && outer.flags & SCOPE_TOP) {
+          scopeAdd(outer, id.name, DECLARED_EXPORT_ONLY);
+          undefinedExports.delete(id.name);
+        }
+      });
+    }
+    schedule(sequence);
+  };
+  const visitClass = (node, declaration) => {
+    const sequence: unknown[] = [node.decorators];
+    if (declaration && node.id?.type === "Identifier") {
+      const id = node.id;
+      sequence.push(() => declareName(id.name, BIND_LEXICAL, id.start));
+    }
+    sequence.push(node.superClass);
+    for (const member of node.body?.body ?? []) {
+      if (member?.type === "StaticBlock") sequence.push(enterVarScope, member.body, exit);
+      else sequence.push(member);
+    }
+    schedule(sequence);
+  };
+  const visitCatch = (clause) => {
+    const param = clause.param;
+    const sequence: unknown[] = [];
+    if (param?.type === "Identifier") {
+      sequence.push(enterSimpleCatch, () => pushLexical(current(), param.name));
+    } else {
+      sequence.push(enterBlock);
+      if (param != null) declarePattern(param, BIND_LEXICAL, sequence);
+    }
+    if (clause.resetParam != null) declarePattern(clause.resetParam, BIND_LEXICAL, sequence);
+    sequence.push(bodyStatements(clause.body), exit);
+    schedule(sequence);
+  };
+  const checkLocalExports = (node) => {
+    for (const specifier of node.specifiers ?? []) {
+      const local = specifier?.local;
+      if (local?.type !== "Identifier") continue;
+      if (scopes.some((scope) => scopeDeclares(scope, local.name))) {
+        undefinedExports.delete(local.name);
+      } else {
+        undefinedExports.set(local.name, local);
+      }
+    }
+  };
+
+  const step = (node) => {
+    if (Array.isArray(node)) {
+      for (let index = node.length - 1; index >= 0; index -= 1) {
+        const child = node[index];
+        if (child !== null && typeof child === "object") tasks.push(child);
+      }
+      return;
+    }
+    const childKeys = SCOPE_CHILD_KEYS.get(node.type);
+    if (childKeys !== undefined) {
+      for (let index = childKeys.length - 1; index >= 0; index -= 1) {
+        const child = node[childKeys[index]];
+        if (child !== null && typeof child === "object") tasks.push(child);
+      }
+      return;
+    }
+    switch (node.type) {
+      case "VariableDeclaration": {
+        const binding = node.kind === "var" ? BIND_VAR : BIND_LEXICAL;
+        const sequence = [];
+        for (const declarator of node.declarations ?? []) {
+          declarePattern(declarator?.id, binding, sequence);
+          sequence.push(declarator?.init);
+        }
+        schedule(sequence);
+        return;
+      }
+      case "FunctionDeclaration":
+      case "TSDeclareFunction":
+        visitFunction(node, true);
+        return;
+      case "FunctionExpression":
+      case "ArrowFunctionExpression":
+      case "TSEmptyBodyFunctionExpression":
+        visitFunction(node, false);
+        return;
+      case "ClassDeclaration":
+        visitClass(node, true);
+        return;
+      case "ClassExpression":
+        visitClass(node, false);
+        return;
+      case "BlockStatement":
+        schedule([enterBlock, node.body, exit]);
+        return;
+      case "StaticBlock":
+        schedule([enterVarScope, node.body, exit]);
+        return;
+      case "CatchClause":
+        visitCatch(node);
+        return;
+      case "TryStatement":
+      case "JSXTryExpression":
+        schedule([node.block, node.pending, node.handler, node.finalizer]);
+        return;
+      case "ForStatement":
+        schedule([enterBlock, node.init, node.test, node.update, node.body, exit]);
+        return;
+      case "ForInStatement":
+      case "ForOfStatement":
+      case "JSXForExpression":
+        schedule([
+          enterBlock,
+          node.left,
+          node.right,
+          node.index,
+          node.key,
+          node.body,
+          exit,
+          node.empty,
+        ]);
+        return;
+      case "SwitchStatement": {
+        const sequence = [node.discriminant, enterBlock];
+        for (const clause of node.cases ?? []) sequence.push(clause?.test, clause?.consequent);
+        sequence.push(exit);
+        schedule(sequence);
+        return;
+      }
+      case "JSXSwitchExpression": {
+        // Each arm's braces are a scope of their own in core, like `@if`/`@else` bodies.
+        const sequence = [node.discriminant, enterBlock];
+        for (const clause of node.cases ?? []) {
+          sequence.push(clause?.test, enterBlock, clause?.consequent, exit);
+        }
+        sequence.push(exit);
+        schedule(sequence);
+        return;
+      }
+      case "JSXCodeBlock":
+        schedule([enterBlock, node.body, node.render, exit]);
+        return;
+      case "ImportDeclaration":
+        for (const specifier of node.specifiers ?? []) {
+          const local = specifier?.local;
+          if (local?.type === "Identifier") declareName(local.name, BIND_LEXICAL, local.start);
+        }
+        return;
+      case "TSImportEqualsDeclaration":
+        if (node.id?.type === "Identifier") declareName(node.id.name, BIND_LEXICAL, node.id.start);
+        return;
+      case "ExportNamedDeclaration":
+        if (node.source == null && current().flags & SCOPE_TOP) {
+          schedule([node.declaration, () => checkLocalExports(node)]);
+        } else {
+          schedule([node.declaration]);
+        }
+        return;
+      case "TSEnumDeclaration": {
+        const scope = current();
+        const name = node.id?.name;
+        if (typeof name !== "string" || scopeHas(scope, name, DECLARED_ENUM)) return;
+        declareName(name, BIND_LEXICAL, node.id.start);
+        scopeAdd(scope, name, DECLARED_ENUM);
+        return;
+      }
+      case "TSInterfaceDeclaration":
+        if (node.id?.type === "Identifier") {
+          declareTopLevelName(current(), node.id.name, DECLARED_TYPE);
+        }
+        return;
+      case "TSTypeAliasDeclaration": {
+        const scope = current();
+        const id = node.id;
+        if (id?.type !== "Identifier") return;
+        if (scopeHas(scope, id.name, DECLARED_TYPE)) {
+          diagnostics.push(
+            scopeDiagnostic(`type '${id.name}' has already been declared.`, id.start, id.start + 1, {
+              start: id.start,
+              raisedAt: nextTokenEnd(source, id.end),
+              raise: true,
+            }),
+          );
+        }
+        declareTopLevelName(scope, id.name, DECLARED_TYPE);
+        return;
+      }
+      case "TSModuleDeclaration": {
+        let id = node.id;
+        while (id?.type === "TSQualifiedName") id = id.left;
+        if (id?.type === "Identifier" && node.kind !== "global") {
+          declareTopLevelName(current(), id.name, DECLARED_EXPORT_ONLY);
+        }
+        let body = node.body;
+        while (body?.type === "TSModuleDeclaration") body = body.body;
+        if (body?.type === "TSModuleBlock") schedule([enterVarScope, body.body, exit]);
+        return;
+      }
+      case "JSXStyleElement":
+      case "StyleSheet":
+        return;
+    }
+    if (typeof node.type === "string" && node.type.startsWith("TS")) {
+      if (SCOPE_TS_EXPRESSION_WRAPPERS.has(node.type)) schedule([node.expression]);
+      return;
+    }
+    const children = [];
+    for (const key in node) {
+      if (SCOPE_SKIPPED_KEYS.has(key)) continue;
+      children.push(node[key]);
+    }
+    schedule(children);
+  };
+
+  enter(SCOPE_TOP | SCOPE_VAR);
+  schedule([program.body]);
+  while (tasks.length > 0) {
+    const task = tasks.pop();
+    if (typeof task === "function") task();
+    else step(task);
+  }
+  exit();
+  for (const [name, local] of undefinedExports) {
+    diagnostics.push(
+      scopeDiagnostic(`Export '${name}' is not defined`, local.start, local.start + 1, {
+        start: local.start,
+        raisedAt: source.length,
+        raise: true,
+      }),
+    );
+  }
+  return diagnostics;
+}
+
+// Core raises a few scope errors through acorn (`Export 'x' is not defined`, a redeclared type
+// alias): a strict parse throws a `SyntaxError` with `pos`, a `{ line, column }` `loc`, and
+// `raisedAt`, and the position appended to the message. The rest throw as a `CompileError` one
+// character wide at the redeclared name.
+function scopeFatalError(error, filename, positionAt) {
+  const fatal = error.compatFatal;
+  if (fatal.raise) {
+    const loc = positionAt(fatal.start);
+    const raised = new SyntaxError(
+      `${error.message} (${loc.line}:${loc.column})`,
+    ) as SyntaxError & { pos?: number; loc?: unknown; raisedAt?: number };
+    raised.pos = fatal.start;
+    raised.loc = loc;
+    raised.raisedAt = fatal.raisedAt;
+    return raised;
+  }
+  return toCompileError(
+    { message: error.message, labels: [{ start: fatal.start, end: fatal.end }] },
+    filename,
+    positionAt,
+    "fatal",
+    undefined,
+  );
+}
+
+// A strict parse throws the first error core throws. Core records the first of two clashing
+// parameters only when collecting, so a strict parse skips that record.
+function strictError(errors, filename, positionAt, source) {
+  const error = errors.find((candidate) => candidate?.compatFatal !== null) ?? errors[0];
+  if (error?.compatFatal != null) return scopeFatalError(error, filename, positionAt);
+  return toCompileError(error, filename, positionAt, "fatal", source);
+}
+
+// Merges two diagnostic lists by start, keeping each list's own order.
+function mergeBySourceOrder(left, right) {
+  if (left.length === 0) return right;
+  if (right.length === 0) return left;
+  const merged = [];
+  let l = 0;
+  let r = 0;
+  while (l < left.length && r < right.length) {
+    if (diagnosticStart(right[r]) < diagnosticStart(left[l])) merged.push(right[r++]);
+    else merged.push(left[l++]);
+  }
+  while (l < left.length) merged.push(left[l++]);
+  while (r < right.length) merged.push(right[r++]);
+  return merged;
+}
+
 // `@tsrx/core` 0.5 ends a `<script>` body where HTML ends it: at the first `</script` followed by
 // optional HTML whitespace and `>`. The native parser stops the body there too; any other
 // `</script` in any letter case (`</SCRIPT>`, `</scripts>`, `</script/>`) is left in `content`,
@@ -1784,6 +2410,20 @@ export function createTsrxCoreCompat(parser) {
             nativeErrors = sortBySourceOrder([...nativeErrors, ...scriptErrors]);
           }
         }
+        if (
+          program !== null &&
+          (selectedParserOptions === PARSER_OPTIONS || selectedParserOptions === EAGER_PARSER_OPTIONS)
+        ) {
+          const scopeErrors = scopeDiagnostics(program, source);
+          if (scopeErrors.length > 0) {
+            // Core reports scope errors as it parses, and undefined exports at the end.
+            const exportErrors = scopeErrors.filter((error) => error.message.startsWith("Export '"));
+            const declarationErrors = scopeErrors.filter(
+              (error) => !error.message.startsWith("Export '"),
+            );
+            nativeErrors = [...mergeBySourceOrder(nativeErrors, declarationErrors), ...exportErrors];
+          }
+        }
         comments = wantsComments ? (result?.comments ?? []) : [];
       } catch (error) {
         if (isOperationalError(error) || !isSyntaxErrorLike(error)) throw error;
@@ -1799,7 +2439,7 @@ export function createTsrxCoreCompat(parser) {
 
       if (nativeErrors.length > 0) {
         if (!collecting) {
-          throw toCompileError(nativeErrors[0], resolvedFilename, positions(), "fatal", source);
+          throw strictError(nativeErrors, resolvedFilename, positions(), source);
         }
         if (Array.isArray(options?.errors)) {
           for (const error of nativeErrors) {
