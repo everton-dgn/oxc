@@ -853,50 +853,15 @@ function unwrapParenthesizedExpression(value) {
 	}
 	return expression;
 }
-function splitTextComments(element) {
-	if (!Array.isArray(element.children)) return;
-	const children = [];
-	for (const child of element.children) {
-		const text = child?.type === "JSXText" && typeof child.raw === "string" ? child.raw : "";
-		const piece = (start, end) => {
-			const value = text.slice(start, end);
-			return {
-				type: "JSXText",
-				start: child.start + start,
-				end: child.start + end,
-				value,
-				raw: value
-			};
-		};
-		let copied = 0;
-		for (let index = text.indexOf("/"); index !== -1; index = text.indexOf("/", index + 1)) {
-			let end;
-			if (text[index + 1] === "*") {
-				end = text.indexOf("*/", index + 2);
-				end = end === -1 ? text.length : end + 2;
-			} else if (text[index + 1] === "/" && (index === 0 || /[ \t\r\n]/u.test(text[index - 1]))) end = index + text.slice(index).search(/[\r\n]|$/u);
-			else continue;
-			if (index > copied) children.push(piece(copied, index));
-			const span = {
-				start: child.start + index,
-				end: child.start + end
-			};
-			const expression = {
-				type: "JSXEmptyExpression",
-				...span
-			};
-			children.push({
-				type: "JSXExpressionContainer",
-				...span,
-				expression
-			});
-			copied = end;
-			index = end - 1;
-		}
-		if (copied === 0) children.push(child);
-		else if (copied < text.length) children.push(piece(copied, text.length));
+const TEXT_COMMENT = /\/\*|(?:^|[ \t\r\n])\/\//u;
+function hasTextComment(program) {
+	const stack = [program];
+	while (stack.length > 0) {
+		const node = stack.pop();
+		if (node?.type === "JSXText" && TEXT_COMMENT.test(node.raw)) return true;
+		for (const key in node) if (key !== "parent" && node[key] !== null && typeof node[key] === "object") stack.push(node[key]);
 	}
-	element.children = children;
+	return false;
 }
 function stampTemplateBlock(value) {
 	if (value?.type !== "BlockStatement") return;
@@ -949,7 +914,7 @@ function omitTsrxCoreCompatDefault(type, key, value) {
 function stripOxcDefaultFields(value) {
 	for (const key in value) if (omitTsrxCoreCompatDefault(value.type, key, value[key])) delete value[key];
 }
-function materializeCompatibilityProgram(program, source, filename, loose, positionAt, ordinaryJsx) {
+function materializeCompatibilityProgram(program, source, filename, loose, positionAt) {
 	if (typeof source !== "string") return;
 	const defaultsStripped = program[TSRX_CORE_COMPAT_DEFAULTS_STRIPPED] === true;
 	if (defaultsStripped) delete program[TSRX_CORE_COMPAT_DEFAULTS_STRIPPED];
@@ -981,12 +946,13 @@ function materializeCompatibilityProgram(program, source, filename, loose, posit
 			const elementName = value.openingElement?.name?.name;
 			value.metadata.templateMode = value.type === "JSXStyleElement" || elementName === "script" || value.openingElement?.selfClosing === true ? "script" : "template";
 			templateElements.push(value);
-			if (ordinaryJsx) splitTextComments(value);
 		}
 		const comment = value.type === "JSXEmptyExpression" && source.slice(value.start, value.end);
 		if (comment && /^(\/\/[^\r\n]*|\/\*(?:(?!\*\/)[\s\S])*\*\/)$/u.test(comment)) {
 			const type = comment[1] === "/" ? "Line" : "Block";
-			const text = comment.slice(2, type === "Line" ? void 0 : -2);
+			let text = comment.slice(2, type === "Line" ? void 0 : -2);
+			const indent = /[ \t]*/u.exec(source.slice(source.lastIndexOf("\n", value.start - 1) + 1))[0];
+			if (type === "Block" && text.includes("\n")) text = text.replace(new RegExp(`^${indent}`, "gm"), "");
 			const { start, end, loc } = value;
 			value.innerComments = [{
 				type,
@@ -1814,7 +1780,7 @@ function createTsrxCoreCompat(parser) {
 				try {
 					result = parser.parseSync(resolvedFilename, source, selectedParserOptions);
 				} catch (ordinaryError) {
-					if (selectedParserOptions !== TYPESCRIPT_REACT_PARSER_OPTIONS || typeof source !== "string" || !source.includes("@{")) throw ordinaryError;
+					if (selectedParserOptions !== TYPESCRIPT_REACT_PARSER_OPTIONS || typeof source !== "string" || !(source.includes("@{") || TEXT_COMMENT.test(source))) throw ordinaryError;
 					try {
 						const retry = tsrxRetry(parser, resolvedFilename, source, eagerTsrx);
 						if (retry === null) throw ordinaryError;
@@ -1838,7 +1804,7 @@ function createTsrxCoreCompat(parser) {
 					throw translated;
 				}
 			}
-			if (selectedParserOptions === TYPESCRIPT_REACT_PARSER_OPTIONS && typeof source === "string" && source.includes("@{") && (parserResultProgram(result) === null || parserResultErrors(result).length > 0)) try {
+			if (selectedParserOptions === TYPESCRIPT_REACT_PARSER_OPTIONS && typeof source === "string" && (parserResultProgram(result) === null || parserResultErrors(result).length > 0 ? source.includes("@{") || TEXT_COMMENT.test(source) : hasTextComment(parserResultProgram(result)))) try {
 				const retry = tsrxRetry(parser, resolvedFilename, source, eagerTsrx);
 				if (retry !== null) {
 					result = retry.result;
@@ -1908,7 +1874,7 @@ function createTsrxCoreCompat(parser) {
 				if (nativeErrors.length > 0) throw toCompileError(nativeErrors[0], resolvedFilename, positions(), "fatal", source);
 				throw missingProgramError(resolvedFilename);
 			}
-			materializeCompatibilityProgram(program, source, resolvedFilename, Boolean(options?.loose), positions(), selectedParserOptions === TYPESCRIPT_REACT_PARSER_OPTIONS);
+			materializeCompatibilityProgram(program, source, resolvedFilename, Boolean(options?.loose), positions());
 			if (wantsComments) for (const comment of comments) options.comments.push(compatibleComment(comment, positions()));
 			return program;
 		}

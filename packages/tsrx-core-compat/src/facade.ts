@@ -1058,41 +1058,20 @@ function unwrapParenthesizedExpression(value) {
 }
 
 // `@tsrx/core` 0.5 reads a JavaScript comment in JSX text as a comment, `.tsx` and `.jsx` included,
-// where OXC reads it as text: `/* ... */` anywhere, and `//` to the line break where whitespace
-// comes right before it or it starts the text. Each one becomes an empty `{}` child spanning
-// exactly the comment, between the text around it. The native TSRX parser gives them so already.
-function splitTextComments(element) {
-  if (!Array.isArray(element.children)) return;
-  const children = [];
-  for (const child of element.children) {
-    // Core keeps entities as written in `value`, so each piece's `value` is its `raw`.
-    const text = child?.type === "JSXText" && typeof child.raw === "string" ? child.raw : "";
-    const piece = (start, end) => {
-      const value = text.slice(start, end);
-      return { type: "JSXText", start: child.start + start, end: child.start + end, value, raw: value };
-    };
-    let copied = 0;
-    for (let index = text.indexOf("/"); index !== -1; index = text.indexOf("/", index + 1)) {
-      let end;
-      if (text[index + 1] === "*") {
-        end = text.indexOf("*/", index + 2);
-        end = end === -1 ? text.length : end + 2;
-      } else if (text[index + 1] === "/" && (index === 0 || /[ \t\r\n]/u.test(text[index - 1]))) {
-        end = index + text.slice(index).search(/[\r\n]|$/u);
-      } else {
-        continue;
-      }
-      if (index > copied) children.push(piece(copied, index));
-      const span = { start: child.start + index, end: child.start + end };
-      const expression = { type: "JSXEmptyExpression", ...span };
-      children.push({ type: "JSXExpressionContainer", ...span, expression });
-      copied = end;
-      index = end - 1;
+// where OXC's TSX grammar reads it as text or code. Such a file takes the TSRX lane, as it does in
+// core, when the TSX lane fails or leaves a comment in a text.
+const TEXT_COMMENT = /\/\*|(?:^|[ \t\r\n])\/\//u;
+
+function hasTextComment(program) {
+  const stack = [program];
+  while (stack.length > 0) {
+    const node = stack.pop();
+    if (node?.type === "JSXText" && TEXT_COMMENT.test(node.raw)) return true;
+    for (const key in node) {
+      if (key !== "parent" && node[key] !== null && typeof node[key] === "object") stack.push(node[key]);
     }
-    if (copied === 0) children.push(child);
-    else if (copied < text.length) children.push(piece(copied, text.length));
   }
-  element.children = children;
+  return false;
 }
 
 function stampTemplateBlock(value) {
@@ -1222,7 +1201,7 @@ function stripOxcDefaultFields(value) {
   }
 }
 
-function materializeCompatibilityProgram(program, source, filename, loose, positionAt, ordinaryJsx) {
+function materializeCompatibilityProgram(program, source, filename, loose, positionAt) {
   if (typeof source !== "string") return;
   const defaultsStripped = program[TSRX_CORE_COMPAT_DEFAULTS_STRIPPED] === true;
   if (defaultsStripped) delete program[TSRX_CORE_COMPAT_DEFAULTS_STRIPPED];
@@ -1267,14 +1246,16 @@ function materializeCompatibilityProgram(program, source, filename, loose, posit
           ? "script"
           : "template";
       templateElements.push(value);
-      if (ordinaryJsx) splitTextComments(value);
     }
 
     // An empty `{}` that spans exactly one comment holds it, as core's `innerComments`.
     const comment = value.type === "JSXEmptyExpression" && source.slice(value.start, value.end);
     if (comment && /^(\/\/[^\r\n]*|\/\*(?:(?!\*\/)[\s\S])*\*\/)$/u.test(comment)) {
       const type = comment[1] === "/" ? "Line" : "Block";
-      const text = comment.slice(2, type === "Line" ? undefined : -2);
+      let text = comment.slice(2, type === "Line" ? undefined : -2);
+      // Core takes the indentation of the comment's first line off each line of a block.
+      const indent = /[ \t]*/u.exec(source.slice(source.lastIndexOf("\n", value.start - 1) + 1))[0];
+      if (type === "Block" && text.includes("\n")) text = text.replace(new RegExp(`^${indent}`, "gm"), "");
       const { start, end, loc } = value;
       value.innerComments = [{ type, value: text, start, end, loc }];
     }
@@ -2270,7 +2251,7 @@ export function createTsrxCoreCompat(parser) {
           if (
             selectedParserOptions !== TYPESCRIPT_REACT_PARSER_OPTIONS ||
             typeof source !== "string" ||
-            !source.includes("@{")
+            !(source.includes("@{") || TEXT_COMMENT.test(source))
           ) {
             throw ordinaryError;
           }
@@ -2315,8 +2296,9 @@ export function createTsrxCoreCompat(parser) {
       if (
         selectedParserOptions === TYPESCRIPT_REACT_PARSER_OPTIONS &&
         typeof source === "string" &&
-        source.includes("@{") &&
-        (parserResultProgram(result) === null || parserResultErrors(result).length > 0)
+        (parserResultProgram(result) === null || parserResultErrors(result).length > 0
+          ? source.includes("@{") || TEXT_COMMENT.test(source)
+          : hasTextComment(parserResultProgram(result)))
       ) {
         try {
           const retry = tsrxRetry(parser, resolvedFilename, source, eagerTsrx);
@@ -2446,7 +2428,6 @@ export function createTsrxCoreCompat(parser) {
         resolvedFilename,
         Boolean(options?.loose),
         positions(),
-        selectedParserOptions === TYPESCRIPT_REACT_PARSER_OPTIONS,
       );
 
       if (wantsComments) {

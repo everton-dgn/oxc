@@ -5,7 +5,13 @@
 
 use crate::diagnostics::ProjectionError;
 
-use super::{super::format::FormatProjection, text::parse_decimal};
+use super::{
+    super::format::{FormatProjection, Gap},
+    text::parse_decimal,
+};
+
+/// Oxfmt's spelling of a significant JSX space at a line break.
+const SPACER: &str = "{\" \"}";
 
 pub(super) fn lift_text_comments(
     source: &str,
@@ -45,7 +51,20 @@ pub(super) fn lift_text_comments(
             return Err(mismatch);
         }
         let indent = line_indentation(source, open - 1);
-        output.push_str(&source[copied..open - 1]);
+        let [before, after] =
+            *projection.text_comments.get(next).ok_or_else(|| mismatch.clone())?;
+        // Where Oxfmt broke a line the author didn't, the comment goes back onto its line: the
+        // whitespace it dropped, and a spacer `{" "}` it wrote, are layout and a space.
+        let prefix = &source[copied..open - 1];
+        let kept = prefix.trim_end();
+        match (before, prefix[kept.len()..].contains(['\n', '\r'])) {
+            (Gap::Glued, true) => output.push_str(kept),
+            (Gap::Spaced, true) if kept.ends_with(SPACER) => {
+                output.push_str(&kept[..kept.len() - SPACER.len()]);
+                output.push(' ');
+            }
+            _ => output.push_str(prefix),
+        }
         // A `//` is a comment after whitespace or a tag, and runs to the end of its line.
         if line && !output.ends_with(|c: char| c.is_ascii_whitespace() || c == '>' || c == '}') {
             output.push_str(line_break);
@@ -58,9 +77,17 @@ pub(super) fn lift_text_comments(
             output.push_str(indent);
         }
         copied = close + 1;
+        // A line break the author wrote after a block comment, which Oxfmt dropped, is layout.
+        if !line
+            && after == Gap::Layout
+            && source[copied..].starts_with(|c: char| !c.is_ascii_whitespace())
+        {
+            output.push_str(line_break);
+            output.push_str(indent);
+        }
         next += 1;
     }
-    if next != projection.text_comments {
+    if next != projection.text_comments.len() {
         return Err(ProjectionError::ScaffoldMismatch { index: next });
     }
     output.push_str(&source[copied..]);

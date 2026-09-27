@@ -273,12 +273,12 @@ impl Scanner<'_> {
         // The text run in progress began after the opening tag or the last child; a `//` that
         // starts it is a comment.
         let mut run_start = index;
-        // A comment in this element's text swallowed a closing tag. `@tsrx/core` then ends the
-        // element at the `}` that closes the template, or at the end of the source.
-        let mut closing_may_be_swallowed = false;
+        // A comment in this element's text may swallow its closing tag. `@tsrx/core` then ends the
+        // element at the next `}` (which always ends it there), or at the end of the source.
+        let mut has_comment = false;
         loop {
             let Some(&byte) = self.bytes.get(index) else {
-                if closing_may_be_swallowed {
+                if has_comment {
                     return Err(self.unclosed_tag(index, display_name)?);
                 }
                 return Err(ProjectionError::UnterminatedSyntax {
@@ -412,11 +412,8 @@ impl Scanner<'_> {
                     let implicit_closes = self.implicit_closes.len();
                     index = self.scan_jsx_element(index)?;
                     // A child a `}` closed early leaves this element open at the same `}`.
-                    if self.implicit_closes.len() > implicit_closes
-                        && self.bytes.get(index) == Some(&b'}')
-                    {
-                        closing_may_be_swallowed = true;
-                    }
+                    has_comment |= self.implicit_closes.len() > implicit_closes
+                        && self.bytes.get(index) == Some(&b'}');
                     run_start = index;
                 }
                 b'{' => {
@@ -478,8 +475,8 @@ impl Scanner<'_> {
                         .map_or(self.bytes.len(), |relative| index + 2 + relative);
                     let end = (body_end + 2).min(self.bytes.len());
                     self.mark_surrogates(index + 2, body_end, OpaqueSurrogateContext::Comment);
-                    closing_may_be_swallowed |=
-                        self.text_comment(index, end)? || body_end == self.bytes.len();
+                    self.jsx_text_comments.push(ByteSpan::new(to_u32(index)?, to_u32(end)?));
+                    has_comment = true;
                     index = end;
                 }
                 b'/' if self.bytes.get(index + 1) == Some(&b'/')
@@ -487,10 +484,11 @@ impl Scanner<'_> {
                         || matches!(self.bytes[index - 1], b' ' | b'\t' | b'\n' | b'\r')) =>
                 {
                     let end = self.skip_line_comment(index + 2);
-                    closing_may_be_swallowed |= self.text_comment(index, end)?;
+                    self.jsx_text_comments.push(ByteSpan::new(to_u32(index)?, to_u32(end)?));
+                    has_comment = true;
                     index = end;
                 }
-                b'}' if closing_may_be_swallowed => {
+                b'}' if has_comment => {
                     if dynamic {
                         // No projection can restore a dynamic closing tag it never saw.
                         return Err(self.unclosed_tag(index, display_name)?);
@@ -505,12 +503,6 @@ impl Scanner<'_> {
                 }
             }
         }
-    }
-
-    /// Records the comment `[start, end)` in JSX text, and whether it holds a closing tag.
-    fn text_comment(&mut self, start: usize, end: usize) -> Result<bool, ProjectionError> {
-        self.jsx_text_comments.push(ByteSpan::new(to_u32(start)?, to_u32(end)?));
-        Ok(find_bytes(&self.bytes[start..end], b"</").is_some())
     }
 
     fn unclosed_tag(

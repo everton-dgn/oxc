@@ -2,12 +2,12 @@
 //! marker comments on the way instead of leaking them to callers.
 
 use tsrx_syntax::{OverlayView, ProjectionSegment};
-use tsrx_tape_schema::{CommentTable, ProjectedCommentKind};
+use tsrx_tape_schema::{CommentTable, ProjectedCommentKind, TapeSpan};
 
 use crate::TsrxParseError;
 
 use super::{
-    mapping::map_affine_span,
+    mapping::{map_affine_span, map_endpoint},
     marker::parse_marker,
     marker_validation::MarkerValidation,
     text::{packed_string, slice},
@@ -57,6 +57,22 @@ pub(crate) fn reconstruct_comments<'a>(
                 value.ok_or(TsrxParseError::Unsupported(
                     "authored comment delimiters are malformed",
                 ))?,
+            )?;
+            continue;
+        }
+        // A `//` comment in JSX text holding U+2028 or U+2029, written inside `/* ... */`.
+        if comment.kind == ProjectedCommentKind::Block
+            && let (Some(start), Some(end)) = (
+                map_endpoint(segments, comment.span.start + 2, true),
+                map_endpoint(segments, comment.span.end.saturating_sub(2), false),
+            )
+            && overlay.jsx_text_comments.iter().any(|text| (text.start, text.end) == (start, end))
+        {
+            let span = TapeSpan::new(start, end);
+            authored_comments.push(
+                ProjectedCommentKind::Line,
+                span,
+                slice(authored, start + 2, end)?,
             )?;
             continue;
         }

@@ -598,7 +598,15 @@ fn format_text_with_options(
     source: &str,
     options: Option<&FileFormatOptions>,
 ) -> Result<FormatOutput, FormatError> {
-    settle_format(source, |input| format_once(path, input, options))
+    // Oxfmt reads a lone CR in JSX text as a space, not a line break, which changes the text. A
+    // CR is a line break wherever it can stand outside a literal, so it is formatted as a LF.
+    if !contains_bare_carriage_return(source) {
+        return settle_format(source, |input| format_once(path, input, options));
+    }
+    let normalized = source.replace("\r\n", "\n").replace('\r', "\n");
+    let mut output = settle_format(&normalized, |input| format_once(path, input, options))?;
+    output.changed = output.code != source;
+    Ok(output)
 }
 
 /// Formats again when the first pass could have changed what the next one reads, so one
@@ -923,6 +931,23 @@ mod tests {
         let second =
             format_text_with_options(Path::new("App.tsrx"), &first.code, Some(&options)).unwrap();
         assert_eq!(second.code, first.code);
+
+        // tsrx-org/oxc#126 review: a comment stays on the line the author wrote it on where
+        // Oxfmt broke it off, and a CR-only file keeps its text.
+        for (source, expected) in [
+            (
+                "export function App({ x }) @{\n\t<div>\n\t\t@if (x) {\n\t\t\t<i />\n\t\t} // e\n\t\t/* a *//* b */\n\t\t/*\n\t\t * x\n\t\t */\n\t\ty\n\t</div>\n}\n",
+                "export function App({ x }) @{\n  <div>\n    @if (x) {\n      <i />;\n    } // e\n    /* a *//* b */\n    /*\n     * x\n     */\n    y\n  </div>;\n}\n",
+            ),
+            (
+                "export function App() @{\r\t<p>\r\t\ta // c\r\t\tb\r\t</p>\r}\r",
+                "export function App() @{\n  <p>\n    a // c\n    b\n  </p>;\n}\n",
+            ),
+        ] {
+            let first = format_text(Path::new("App.tsrx"), source).unwrap();
+            assert_eq!(first.code, expected);
+            assert_eq!(format_text(Path::new("App.tsrx"), &first.code).unwrap().code, expected);
+        }
     }
 
     #[test]

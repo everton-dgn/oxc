@@ -56,7 +56,7 @@ pub fn lift_formatted(
         lift_embedded(&lifted, original_source, projection)?
     };
     // Before the token lift, which reads every `/*` marker in the namespace as a token marker.
-    let lifted = if projection.text_comments == 0 {
+    let lifted = if projection.text_comments.is_empty() {
         lifted
     } else {
         lift_text_comments(&lifted, projection)?

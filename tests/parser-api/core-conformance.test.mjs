@@ -51,7 +51,7 @@ const children = (ast) =>
         : child.expression?.type === "JSXEmptyExpression"
           ? (assert.deepEqual([child.expression.start, child.expression.end], [child.start, child.end]),
             ["{}", child.start, child.end, child.expression.innerComments.map(({ type, value }) => [type, value])])
-          : child.openingElement.name.name,
+          : (child.openingElement?.name.name ?? child.type),
     ),
   );
 
@@ -94,6 +94,26 @@ test("#118: an element's children have TSX's shape, with each comment an empty {
       "App.tsx",
       [[["\n  a ", 13, 18], ["{}", 18, 25, [["Block", " c "]]], [" b\n  ", 25, 30], ["{}", 30, 34, [["Line", " d"]]], ["\n", 34, 35]]],
     ],
+    [
+      "export function App({ x }) @{\n\t<div>@if (x) { <i /> } else text // e\n\t</div>\n}",
+      "App.tsrx",
+      [["JSXIfExpression", [" else text ", 53, 64], ["{}", 64, 68, [["Line", " e"]]], ["\n\t", 68, 70]], []],
+    ],
+    [
+      "export function App({ x }) @{\n\t<div>@if (x) { <i /> } else\n\t</div>\n}",
+      "App.tsrx",
+      [["JSXIfExpression", [" else\n\t", 53, 60]], []],
+    ],
+    [
+      "export function App() @{\n\t<p>a // e\u2028<b />\n\t</p>\n}",
+      "App.tsrx",
+      [[["a ", 29, 31], ["{}", 31, 41, [["Line", " e\u2028<b />"]]], ["\n\t", 41, 43]]],
+    ],
+    [
+      "const x = <p>\n\t// <b> { }\n\t/* </p> a > b */\n</p>;",
+      "App.tsx",
+      [[["\n\t", 13, 15], ["{}", 15, 25, [["Line", " <b> { }"]]], ["\n\t", 25, 27], ["{}", 27, 43, [["Block", " </p> a > b "]]], ["\n", 43, 44]]],
+    ],
   ];
   for (const [source, filename, expected] of cases) {
     assert.deepEqual(children(parseModule(source, filename)), expected, source);
@@ -103,6 +123,23 @@ test("#118: an element's children have TSX's shape, with each comment an empty {
   assert.deepEqual(empty.innerComments, [
     { type: "Block", value: " c ", start: 15, end: 22, loc: { start: { line: 1, column: 15 }, end: { line: 1, column: 22 } } },
   ]);
+});
+
+test("#118: collect mode records an unclosed element whose text holds a comment", () => {
+  for (const source of [
+    "export function App() @{\n\t<p>// c\n}\n",
+    "export function App() @{\n\t<p>/* c */\n}\n",
+    "export function App() @{\n\t<p>a\n// c\n}\n",
+    "export function App() @{\n\t<p><b />\n// c\n}\n",
+  ]) {
+    const errors = [];
+    parseModule(source, "App.tsrx", { collect: true, errors });
+    assert.deepEqual(
+      errors.map(({ message, code }) => [message, code]),
+      [["Unclosed tag '<p>'. Expected '</p>' before end of template.", "tsrx-unclosed-tag"]],
+      source,
+    );
+  }
 });
 
 test("#110: a comment in JSX text is a comment to the parser, in source order", () => {

@@ -140,10 +140,19 @@ impl<'a> Builder<'a> {
                 }
                 // The braces stand for the comment's ends, so the container and its empty
                 // expression span exactly the comment.
-                self.push_anchored("{", comment.start)?;
-                self.copy_verbatim(comment)?;
-                let line = self.source.as_bytes().get(comment.start as usize + 1) == Some(&b'/');
-                self.push_anchored(if line { "\n}" } else { "}" }, comment.end)?;
+                // A `//` comment runs to `\r` or `\n`; one holding U+2028 or U+2029, which end
+                // a comment for OXC, is written inside `/* ... */`.
+                let text = &self.source[comment.start as usize..comment.end as usize];
+                let line = text.starts_with("//");
+                if line && text.contains(['\u{2028}', '\u{2029}']) && !text.contains("*/") {
+                    self.push_anchored("{/*", comment.start)?;
+                    self.copy_verbatim(comment)?;
+                    self.push_anchored("*/}", comment.end)?;
+                } else {
+                    self.push_anchored("{", comment.start)?;
+                    self.copy_verbatim(comment)?;
+                    self.push_anchored(if line { "\n}" } else { "}" }, comment.end)?;
+                }
                 self.text_comment += 1;
                 start = comment.end;
                 continue;

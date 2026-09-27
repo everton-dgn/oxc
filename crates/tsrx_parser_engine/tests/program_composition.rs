@@ -1650,18 +1650,21 @@ fn a_comment_that_swallows_a_closing_tag_leaves_its_element_unclosed() {
 }
 
 #[test]
-fn a_comment_leaves_a_later_brace_in_text_as_it_would_be_without_it() {
-    // Bugbot on tsrx-org/oxc#119: a comment that swallows no closing tag must not make a later
-    // `}` in the text close the element early.
-    let messages = |source: &str| {
+fn an_unclosed_element_whose_text_holds_a_comment_ends_at_the_brace() {
+    // tsrx-org/oxc#126 review: `@tsrx/core` ends an element at a `}` in its text and reports it
+    // unclosed, and collect mode keeps the tree. A comment may have swallowed the closing tag.
+    for source in [
+        "export function App() @{\n\t<p>// c\n}\n",
+        "export function App() @{\n\t<p>/* c */\n}\n",
+        "export function App() @{\n\t<p>a\n\t\t// c\n}\n",
+        "export function App() @{\n\t<p>\n\t\t<b />\n\t\t// c\n}\n",
+    ] {
         let result = parse_tsrx(&TsrxParseRequest { source }).expect("grammar result");
-        error_messages(&result)
-            .into_iter()
-            .map(|(message, _)| message.to_owned())
-            .collect::<Vec<_>>()
-    };
-    let with_comment = messages("export function App() @{\n\t<p>/* c */ a } b</p>\n}");
-    assert!(!with_comment.is_empty());
-    assert!(!with_comment.iter().any(|message| message.starts_with("Unclosed tag")));
-    assert_eq!(with_comment, messages("export function App() @{\n\t<p>a } b</p>\n}"));
+        let brace = offset(source.find('}').expect("brace"));
+        assert_eq!(
+            error_messages(&result),
+            [("Unclosed tag '<p>'. Expected '</p>' before end of template.", brace)],
+            "{source:?}"
+        );
+    }
 }

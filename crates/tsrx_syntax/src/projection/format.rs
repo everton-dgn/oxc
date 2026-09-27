@@ -44,6 +44,22 @@ pub(super) struct StyleManifest {
     pub(super) payload: ByteSpan,
 }
 
+/// What separates a comment in JSX text from its neighbour on one side, as authored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Gap {
+    Glued,
+    Spaced,
+    Layout,
+}
+
+fn gap(spaces: usize, next: Option<char>) -> Gap {
+    match next {
+        None | Some('\n' | '\r') => Gap::Layout,
+        _ if spaces > 0 => Gap::Spaced,
+        _ => Gap::Glued,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ScriptManifest {
     pub(super) payload: ByteSpan,
@@ -88,8 +104,9 @@ pub struct FormatProjection {
     pub(super) dynamic_comments: Vec<ByteSpan>,
     pub(super) styles: Vec<StyleManifest>,
     pub(super) scripts: Vec<ScriptManifest>,
-    /// How many comments in JSX text the projection wrote in marked braces.
-    pub(super) text_comments: usize,
+    /// What the author wrote before and after each comment in JSX text, which the projection
+    /// wrote in marked braces.
+    pub(super) text_comments: Vec<[Gap; 2]>,
     pub(super) parser_code_blocks: Vec<ParserCodeBlock>,
     pub(super) parser_shorthand_attributes: Vec<ParserShorthandAttribute>,
     pub(super) shape_fingerprint: u128,
@@ -108,7 +125,7 @@ impl FormatProjection {
             + self.dynamic_comments.len()
             + self.styles.len()
             + self.scripts.len()
-            + self.text_comments
+            + self.text_comments.len()
             + self.parser_code_blocks.len()
             + self.parser_shorthand_attributes.len()
     }
@@ -179,7 +196,20 @@ pub fn project_for_format(
         dynamic_comments: overlay.dynamic_comments.clone(),
         styles,
         scripts,
-        text_comments: overlay.jsx_text_comments.len(),
+        text_comments: overlay
+            .jsx_text_comments
+            .iter()
+            .map(|comment| {
+                let (before, after) =
+                    (&source[..comment.start as usize], &source[comment.end as usize..]);
+                let (left, right) =
+                    (before.trim_end_matches([' ', '\t']), after.trim_start_matches([' ', '\t']));
+                [
+                    gap(before.len() - left.len(), left.chars().next_back()),
+                    gap(0, right.chars().next()),
+                ]
+            })
+            .collect(),
         parser_code_blocks: overlay.parser_code_blocks.clone(),
         parser_shorthand_attributes: overlay.parser_shorthand_attributes.clone(),
         shape_fingerprint: structural_fingerprint(overlay),
