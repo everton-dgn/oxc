@@ -6,7 +6,7 @@ import { parseModule } from "../../packages/tsrx-core-compat/dist/index.js";
 // Regression tests for the @tsrx/core 0.5.0 conformance issues tsrx-org/oxc #110, #112, #113,
 // #114, #115, #116, #117, #118, #125, #127, and #128. Every expected value below is what @tsrx/core 0.5.0 (tsrx main at
 // f78fada) returns for the same source, so a difference here is a difference from the reference
-// parser.
+// parser. The #111 tests at the end take theirs from @tsrx/core 0.5.2.
 
 function findAll(root, predicate) {
   const found = [];
@@ -41,13 +41,13 @@ const script = (ast) =>
     (node) => node.type === "JSXElement" && node.openingElement?.name?.name === "script",
   )[0];
 
-// Each element's children, as `[value, start, end]` for a JSXText, `["{}", start, end]` for an
+// Each element's children, as `[raw, start, end]` for a JSXText, `["{}", start, end]` for an
 // empty expression container, and the tag name for an element.
 const children = (ast) =>
   findAll(ast, (node) => node.type === "JSXElement").map((element) =>
     element.children.map((child) =>
       child.type === "JSXText"
-        ? (assert.equal(child.raw, child.value), [child.value, child.start, child.end])
+        ? [child.raw, child.start, child.end]
         : child.expression?.type === "JSXEmptyExpression"
           ? (assert.deepEqual([child.expression.start, child.expression.end], [child.start, child.end]),
             ["{}", child.start, child.end, child.expression.innerComments.map(({ type, value }) => [type, value])])
@@ -919,4 +919,138 @@ test("#117: an error carries the code @tsrx/core gives the same mistake", () => 
   // OXC gives a parameter property outside a constructor TS1090. TypeScript gives TS2369, as core
   // does when it records the error.
   assert.throws(() => parseModule("function f(private a) {}", "App.tsrx"), { code: "TS2369" });
+});
+
+// #111: character references in JSX text and string attributes. `value` is decoded as
+// acorn-typescript's `jsx_readEntity` decodes it for @tsrx/core 0.5.2, and `raw` is as written.
+
+// `[value, raw]` of every text that isn't only ASCII whitespace.
+const textValues = (ast) =>
+  findAll(ast, (node) => node.type === "JSXText")
+    .filter(({ raw }) => raw.trim() !== "")
+    .map(({ value, raw }) => [value, raw]);
+
+// `[value, raw]` of every string attribute value.
+const attributeValues = (ast) =>
+  findAll(ast, (node) => node.type === "JSXAttribute" && node.value?.type === "Literal").map(
+    ({ value }) => [value.value, value.raw],
+  );
+
+const inTemplate = (jsx) => `export function App() @{\n\t${jsx}\n}`;
+const inFunction = (jsx) => `export function App() {\n\treturn ${jsx};\n}`;
+const inModule = (jsx) => `const el = ${jsx};\nexport default el;`;
+
+test("#111: attribute strings and text decode their references into value, in every JSX", () => {
+  for (const wrap of [inTemplate, inFunction, inModule]) {
+    for (const filename of ["App.tsrx", "App.tsx"]) {
+      const attributes = parseModule(
+        wrap(`<div title="a &amp;lt;b&amp;gt; &quot;q&quot; &#x2713;" alt='&apos;' />`),
+        filename,
+      );
+      assert.deepEqual(attributeValues(attributes), [
+        ['a &lt;b&gt; "q" ✓', '"a &amp;lt;b&amp;gt; &quot;q&quot; &#x2713;"'],
+        ["'", "'&apos;'"],
+      ]);
+      const text = parseModule(wrap(`<p>a &quot;b&quot; &amp;lt; &nbsp;&#x1F600; &bogus;</p>`), filename);
+      assert.deepEqual(textValues(text), [
+        ['a "b" &lt;  😀 &bogus;', "a &quot;b&quot; &amp;lt; &nbsp;&#x1F600; &bogus;"],
+      ]);
+    }
+  }
+});
+
+test("#111: only acorn-jsx's references decode; anything else stays as written", () => {
+  const ast = parseModule(
+    inTemplate(
+      `<p a="AT&T & &; &&amp; &check; &amp &#1114112; &#X41;">AT&T & &; &&amp; &check; &amp &#1114112; &#X41; &#x10FFFF; &hearts; &#; &#xG;</p>`,
+    ),
+    "App.tsrx",
+  );
+  assert.deepEqual(attributeValues(ast), [
+    ["AT&T & &; && &check; &amp &#1114112; A", '"AT&T & &; &&amp; &check; &amp &#1114112; &#X41;"'],
+  ]);
+  assert.deepEqual(textValues(ast), [
+    [
+      "AT&T & &; && &check; &amp &#1114112; A \u{10ffff} ♥ &#; &#xG;",
+      "AT&T & &; &&amp; &check; &amp &#1114112; &#X41; &#x10FFFF; &hearts; &#; &#xG;",
+    ],
+  ]);
+  // A name that is also an Object.prototype key is no table name.
+  const proto = parseModule(inFunction(`<p a="&constructor;">&toString; &__proto__;</p>`), "App.tsrx");
+  assert.deepEqual(attributeValues(proto), [["&constructor;", '"&constructor;"']]);
+  assert.deepEqual(textValues(proto), [["&toString; &__proto__;", "&toString; &__proto__;"]]);
+});
+
+test("#111: a reference is read from at most 10 characters after the &, its ; included", () => {
+  const ast = parseModule(
+    inFunction(`<p a="&#00000065;&#000000065;">&#x0000041; &#x00000041; &thetasym; &abcdefghij;</p>`),
+    "App.tsrx",
+  );
+  assert.deepEqual(attributeValues(ast), [["A&#000000065;", '"&#00000065;&#000000065;"']]);
+  assert.deepEqual(textValues(ast), [
+    ["A &#x00000041; ϑ &abcdefghij;", "&#x0000041; &#x00000041; &thetasym; &abcdefghij;"],
+  ]);
+});
+
+test("#111: a reference cut off by a comment or a child is text", () => {
+  for (const wrap of [inTemplate, inFunction]) {
+    const ast = parseModule(wrap(`<b>&amp/* c */;</b>`), "App.tsrx");
+    assert.deepEqual(textValues(ast), [
+      ["&amp", "&amp"],
+      [";", ";"],
+    ]);
+    const [element] = findAll(ast, (node) => node.type === "JSXElement");
+    assert.deepEqual(
+      element.children.map(({ type }) => type),
+      ["JSXText", "JSXExpressionContainer", "JSXText"],
+    );
+  }
+  assert.deepEqual(textValues(parseModule(inFunction(`<b>&amp<i />;</b>`), "App.tsrx")), [
+    ["&amp", "&amp"],
+    [";", ";"],
+  ]);
+  assert.deepEqual(textValues(parseModule(inTemplate(`<b>&amp{x};</b>`), "App.tsrx")), [
+    ["&amp", "&amp"],
+    [";", ";"],
+  ]);
+});
+
+test("#111: text split by a comment decodes each piece on its own", () => {
+  const ast = parseModule(inTemplate(`<b>&lt;x/* c */&gt;y // d\n&amp;</b>`), "App.tsrx");
+  assert.deepEqual(textValues(ast), [
+    ["<x", "&lt;x"],
+    [">y ", "&gt;y "],
+    ["\n&", "\n&amp;"],
+  ]);
+});
+
+test("#111: text value reads CRLF as LF and raw keeps it; attribute strings keep CRLF", () => {
+  const ast = parseModule(inFunction(`<p title="a\r\n&amp;b">\r\n  a &amp;\r\n  b\r c\r\n</p>`), "App.tsrx");
+  assert.deepEqual(attributeValues(ast), [["a\r\n&b", '"a\r\n&amp;b"']]);
+  assert.deepEqual(textValues(ast), [["\n  a &\n  b\r c\n", "\r\n  a &amp;\r\n  b\r c\r\n"]]);
+
+  const file = "export function App() @{\r\n\t<p>\r\n\t\ta b\r\n\t</p>\r\n}\r\n";
+  const [text] = findAll(parseModule(file, "App.tsrx"), (node) => node.type === "JSXText");
+  assert.deepEqual([text.value, text.raw, text.start, text.end], ["\n\t\ta b\n\t", "\r\n\t\ta b\r\n\t", 30, 40]);
+});
+
+test("#111: strings in expression containers are JavaScript strings and are not decoded", () => {
+  const ast = parseModule(inFunction(`<p a={"&amp;"}>{"&lt;"}{\`&gt;\`}</p>`), "App.tsrx");
+  const strings = findAll(ast, (node) => node.type === "Literal" || node.type === "TemplateElement").map(
+    (node) => (node.type === "Literal" ? node.value : node.value.cooked),
+  );
+  assert.deepEqual(strings.sort(), ["&amp;", "&gt;", "&lt;"]);
+});
+
+test("#111: the native parser keeps its JSX strings as written; only the compat facade decodes", async () => {
+  const { parseSync } = await import("../../packages/toolchain/dist/parser.js");
+  for (const filename of ["App.tsx", "App.tsrx"]) {
+    const { program } = parseSync(filename, `const a = <p t="&amp;&nbsp;">&nbsp;\r\n</p>;`);
+    assert.deepEqual(attributeValues(program), [["&amp;&nbsp;", '"&amp;&nbsp;"']], filename);
+    assert.deepEqual(
+      findAll(program, (node) => node.type === "JSXText").map(({ value, raw }) => [value, raw]),
+      [["&nbsp;\r\n", "&nbsp;\r\n"]],
+      filename,
+    );
+  }
 });
