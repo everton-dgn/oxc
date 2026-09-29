@@ -20,19 +20,24 @@ function tsrxRetry(parser, filename, source, eagerTsrx) {
 	const options = eagerTsrx ? EAGER_PARSER_OPTIONS : PARSER_OPTIONS;
 	const result = parser.parseSync(filename, source, options);
 	if (parserResultProgram(result) === null || parserResultErrors(result).length > 0) return null;
-	if (!source.includes("@{") && !acceptsWithoutTextComments(parser, filename, source, result)) return null;
+	if (!source.includes("@{") && !acceptsWithoutTsrxText(parser, filename, source, result)) return null;
 	return {
 		result,
 		options
 	};
 }
-function acceptsWithoutTextComments(parser, filename, source, result) {
+function acceptsWithoutTsrxText(parser, filename, source, result) {
 	const masked = source.split("");
 	const stack = [parserResultProgram(result)];
 	while (stack.length > 0) {
 		const node = stack.pop();
 		if (node?.type === "JSXEmptyExpression" && /^\/[/*]/u.test(source.slice(node.start, node.end))) {
 			for (let index = node.start; index < node.end; index += 1) if (masked[index] !== "\n" && masked[index] !== "\r") masked[index] = " ";
+		}
+		const script = node?.type === "JSXElement" && node.openingElement?.name?.name === "script" && node.closingElement != null && node.children?.length === 0;
+		const text = node?.type === "JSXText" && typeof node.raw === "string" && node.raw.includes(">") ? [node.start, node.end] : script ? [node.openingElement.end, node.closingElement.start] : null;
+		if (text !== null) {
+			for (let index = text[0]; index < text[1]; index += 1) if (masked[index] === ">") masked[index] = " ";
 		}
 		for (const key in node) if (key !== "parent" && node[key] !== null && typeof node[key] === "object") stack.push(node[key]);
 	}
@@ -907,6 +912,10 @@ function unwrapParenthesizedExpression(value) {
 	return expression;
 }
 const TEXT_COMMENT = /\/\*|(?:^|[ \t\r\n])\/\//u;
+const JSX_TEXT_GT = /^Unexpected token\. Did you mean `\{'>'\}`/u;
+function rejectsJsxTextGt(errors) {
+	return errors.some((error) => typeof error?.message === "string" && JSX_TEXT_GT.test(error.message));
+}
 function hasTextComment(program) {
 	const stack = [program];
 	while (stack.length > 0) {
@@ -1931,7 +1940,7 @@ function createTsrxCoreCompat(parser) {
 				try {
 					result = parser.parseSync(resolvedFilename, source, selectedParserOptions);
 				} catch (ordinaryError) {
-					if (selectedParserOptions !== TYPESCRIPT_REACT_PARSER_OPTIONS || typeof source !== "string" || !(source.includes("@{") || TEXT_COMMENT.test(source))) throw ordinaryError;
+					if (selectedParserOptions !== TYPESCRIPT_REACT_PARSER_OPTIONS || typeof source !== "string" || !(source.includes("@{") || TEXT_COMMENT.test(source) || rejectsJsxTextGt([ordinaryError, ...ordinaryError?.errors ?? []]))) throw ordinaryError;
 					try {
 						const retry = tsrxRetry(parser, resolvedFilename, source, eagerTsrx);
 						if (retry === null) throw ordinaryError;
@@ -1955,7 +1964,7 @@ function createTsrxCoreCompat(parser) {
 					throw translated;
 				}
 			}
-			if (selectedParserOptions === TYPESCRIPT_REACT_PARSER_OPTIONS && typeof source === "string" && (parserResultProgram(result) === null || parserResultErrors(result).length > 0 ? source.includes("@{") || TEXT_COMMENT.test(source) : hasTextComment(parserResultProgram(result)))) try {
+			if (selectedParserOptions === TYPESCRIPT_REACT_PARSER_OPTIONS && typeof source === "string" && (parserResultProgram(result) === null || parserResultErrors(result).length > 0 ? source.includes("@{") || TEXT_COMMENT.test(source) || rejectsJsxTextGt(parserResultErrors(result)) : hasTextComment(parserResultProgram(result)))) try {
 				const retry = tsrxRetry(parser, resolvedFilename, source, eagerTsrx);
 				if (retry !== null) {
 					result = retry.result;

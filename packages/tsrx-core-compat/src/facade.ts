@@ -41,15 +41,16 @@ function tsrxRetry(parser, filename, source, eagerTsrx) {
   if (parserResultProgram(result) === null || parserResultErrors(result).length > 0) {
     return null;
   }
-  if (!source.includes("@{") && !acceptsWithoutTextComments(parser, filename, source, result)) {
+  if (!source.includes("@{") && !acceptsWithoutTsrxText(parser, filename, source, result)) {
     return null;
   }
   return { result, options };
 }
 
-// The TSRX lane runs none of OXC's semantic checks, so a retry made for text comments wins only
-// where the TSX lane accepts the same source with each of those comments blanked out.
-function acceptsWithoutTextComments(parser, filename, source, result) {
+// The TSRX lane runs none of OXC's semantic checks, so a retry made for text comments or a `>` in
+// JSX text wins only where the TSX lane accepts the same source with each of those comments, and
+// each such `>`, blanked out.
+function acceptsWithoutTsrxText(parser, filename, source, result) {
   const masked = source.split("");
   const stack = [parserResultProgram(result)];
   while (stack.length > 0) {
@@ -57,6 +58,23 @@ function acceptsWithoutTextComments(parser, filename, source, result) {
     if (node?.type === "JSXEmptyExpression" && /^\/[/*]/u.test(source.slice(node.start, node.end))) {
       for (let index = node.start; index < node.end; index += 1) {
         if (masked[index] !== "\n" && masked[index] !== "\r") masked[index] = " ";
+      }
+    }
+    // A raw `<script>` body is text to the TSRX lane, which gives the element no children.
+    const script =
+      node?.type === "JSXElement" &&
+      node.openingElement?.name?.name === "script" &&
+      node.closingElement != null &&
+      node.children?.length === 0;
+    const text =
+      node?.type === "JSXText" && typeof node.raw === "string" && node.raw.includes(">")
+        ? [node.start, node.end]
+        : script
+          ? [node.openingElement.end, node.closingElement.start]
+          : null;
+    if (text !== null) {
+      for (let index = text[0]; index < text[1]; index += 1) {
+        if (masked[index] === ">") masked[index] = " ";
       }
     }
     for (const key in node) {
@@ -1126,6 +1144,15 @@ function unwrapParenthesizedExpression(value) {
 // where OXC's TSX grammar reads it as text or code. Such a file takes the TSRX lane, as it does in
 // core, when the TSX lane fails or leaves a comment in a text.
 const TEXT_COMMENT = /\/\*|(?:^|[ \t\r\n])\/\//u;
+
+// `@tsrx/core` 0.5.2 reads a `>` in JSX text as text, `.tsx` and `.jsx` included, where OXC's TSX
+// grammar rejects it with TS1382 (tsrx-org/oxc#145). A file the TSX lane rejects for that takes
+// the TSRX lane, which reads the `>` as text.
+const JSX_TEXT_GT = /^Unexpected token\. Did you mean `\{'>'\}`/u;
+
+function rejectsJsxTextGt(errors) {
+  return errors.some((error) => typeof error?.message === "string" && JSX_TEXT_GT.test(error.message));
+}
 
 function hasTextComment(program) {
   const stack = [program];
@@ -2437,7 +2464,11 @@ export function createTsrxCoreCompat(parser) {
           if (
             selectedParserOptions !== TYPESCRIPT_REACT_PARSER_OPTIONS ||
             typeof source !== "string" ||
-            !(source.includes("@{") || TEXT_COMMENT.test(source))
+            !(
+              source.includes("@{") ||
+              TEXT_COMMENT.test(source) ||
+              rejectsJsxTextGt([ordinaryError, ...(ordinaryError?.errors ?? [])])
+            )
           ) {
             throw ordinaryError;
           }
@@ -2483,7 +2514,9 @@ export function createTsrxCoreCompat(parser) {
         selectedParserOptions === TYPESCRIPT_REACT_PARSER_OPTIONS &&
         typeof source === "string" &&
         (parserResultProgram(result) === null || parserResultErrors(result).length > 0
-          ? source.includes("@{") || TEXT_COMMENT.test(source)
+          ? source.includes("@{") ||
+            TEXT_COMMENT.test(source) ||
+            rejectsJsxTextGt(parserResultErrors(result))
           : hasTextComment(parserResultProgram(result)))
       ) {
         try {

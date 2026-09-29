@@ -27,7 +27,7 @@ use crate::{
     lexical, projection,
     reconstruct::{
         RecoverableDiagnostic, collect_multiple_output_diagnostics, finalize_reachable_spans,
-        reconstruct_projected,
+        reconstruct_projected, restore_jsx_text_gts,
     },
     recovery,
     results::{reconstruct_diagnostics, reconstruct_module},
@@ -218,6 +218,7 @@ fn parse_tsrx_utf8_source_once<W: Utf16WorkObserver>(
         && overlay_view.style_blocks.is_empty()
         && overlay_view.script_blocks.is_empty()
         && overlay_view.jsx_text_comments.is_empty()
+        && overlay_view.jsx_text_gts.is_empty()
     {
         return parse_direct(
             source,
@@ -535,6 +536,13 @@ impl ProjectedCompletion<'_, '_, '_, '_> {
             self.anchors,
             &authored_starts,
             &finalization_index,
+        )?;
+        restore_jsx_text_gts(
+            &mut self.tape,
+            self.source,
+            self.overlay.jsx_text_gts,
+            &finalization_index,
+            self.recovered,
         )?;
         // A comment swallowed a closing tag, and the projection closed the element at the `}`
         // that ends it. `@tsrx/core` reports each such element and keeps the tree.

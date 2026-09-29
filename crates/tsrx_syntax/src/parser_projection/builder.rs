@@ -8,8 +8,8 @@ use crate::{
     diagnostics::{ProjectionError, to_u32},
     model::{
         ByteSpan, ClauseRole, ControlContext, ControlKind, EmbeddedKind, NONE, Overlay,
-        PARSER_EXPRESSION_CODE_BLOCK_PREFIX, ParserCodeBlockKind, ParserDynamicKind,
-        StructuralKind,
+        PARSER_EXPRESSION_CODE_BLOCK_PREFIX, PARSER_JSX_TEXT_GT_STAND_IN, ParserCodeBlockKind,
+        ParserDynamicKind, StructuralKind,
     },
     projection_view::ProjectionSegment,
 };
@@ -24,6 +24,8 @@ pub(super) struct Builder<'a> {
     synthetic_callee_spans: Vec<(u32, u32)>,
     /// Next unwritten entry of `overlay.jsx_text_comments`.
     text_comment: usize,
+    /// Next unwritten entry of `overlay.jsx_text_gts`.
+    text_gt: usize,
     /// Next unwritten entry of `overlay.implicit_closes`.
     implicit_close: usize,
     anchors: Vec<SyntheticAnchor>,
@@ -58,6 +60,7 @@ impl<'a> Builder<'a> {
             cursor: 0,
             synthetic_callee_spans: Vec::new(),
             text_comment: 0,
+            text_gt: 0,
             implicit_close: 0,
             anchors: Vec::new(),
         }
@@ -66,6 +69,7 @@ impl<'a> Builder<'a> {
     pub(super) fn finish(mut self) -> Result<MappedProjection, ProjectionError> {
         self.copy_to(self.source.len())?;
         if self.text_comment != self.overlay.jsx_text_comments.len()
+            || self.text_gt != self.overlay.jsx_text_gts.len()
             || self.implicit_close != self.overlay.implicit_closes.len()
         {
             return Err(ProjectionError::StructuralMismatch);
@@ -102,31 +106,38 @@ impl<'a> Builder<'a> {
     }
 
     /// Copies an authored span. A JavaScript comment in JSX text inside it is written in braces,
-    /// `{/* ... */}` or `{// ...` and a line break, the empty child TSX reads as a comment, and a
-    /// closing tag a comment swallowed is written before the `}` that ends its element.
+    /// `{/* ... */}` or `{// ...` and a line break, the empty child TSX reads as a comment, a `>`
+    /// in JSX text as [`PARSER_JSX_TEXT_GT_STAND_IN`], and a closing tag a comment swallowed is
+    /// written before the `}` that ends its element.
     fn copy_original(&mut self, span: ByteSpan) -> Result<(), ProjectionError> {
         let comments = &self.overlay.jsx_text_comments;
+        let gts = &self.overlay.jsx_text_gts;
         let closes = &self.overlay.implicit_closes;
-        if self.text_comment == comments.len() && self.implicit_close == closes.len() {
+        if self.text_comment == comments.len()
+            && self.text_gt == gts.len()
+            && self.implicit_close == closes.len()
+        {
             return self.copy_verbatim(span);
         }
         let mut start = span.start;
         loop {
             self.write_implicit_closes(start)?;
             let comment = self.overlay.jsx_text_comments.get(self.text_comment).copied();
-            if let Some(comment) = comment
-                && comment.start < start
+            let gt = self.overlay.jsx_text_gts.get(self.text_gt).copied();
+            if comment.is_some_and(|comment| comment.start < start)
+                || gt.is_some_and(|gt| gt < start)
             {
                 return Err(ProjectionError::StructuralMismatch);
             }
             let comment = comment.filter(|comment| comment.start < span.end);
+            let gt = gt.filter(|gt| *gt < span.end);
             let close = self
                 .overlay
                 .implicit_closes
                 .get(self.implicit_close)
                 .map(|close| close.offset)
                 .filter(|offset| *offset < span.end);
-            let stop = [comment.map(|comment| comment.start), close]
+            let stop = [comment.map(|comment| comment.start), gt, close]
                 .into_iter()
                 .flatten()
                 .fold(span.end, u32::min);
@@ -155,6 +166,20 @@ impl<'a> Builder<'a> {
                 }
                 self.text_comment += 1;
                 start = comment.end;
+                continue;
+            }
+            if let Some(gt) = gt
+                && gt == stop
+            {
+                if self.source.as_bytes().get(gt as usize) != Some(&b'>') {
+                    return Err(ProjectionError::StructuralMismatch);
+                }
+                // The stand-in takes the `>`'s one byte, and the empty anchor after it stands for
+                // the offset after the `>`, so a text that starts or ends at it maps back exactly.
+                self.push_anchored(PARSER_JSX_TEXT_GT_STAND_IN, gt)?;
+                self.push_anchored("", gt + 1)?;
+                self.text_gt += 1;
+                start = gt + 1;
                 continue;
             }
             if stop == span.end {

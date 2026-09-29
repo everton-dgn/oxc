@@ -74,6 +74,11 @@ pub(crate) fn validate_overlay(view: OverlayView<'_>) -> Result<(), TsrxParseErr
             ControlKind::Try => validate_try_clauses(view, node_index)?,
         }
     }
+    if view.jsx_text_gts.windows(2).any(|pair| pair[0] >= pair[1])
+        || view.jsx_text_gts.last().is_some_and(|gt| *gt >= view.source_len)
+    {
+        return Err(TsrxParseError::Unsupported("JSX text `>` offsets are out of source order"));
+    }
     if view.nodes.is_empty() && view.first_root != NONE_INDEX {
         return Err(TsrxParseError::Unsupported("invalid empty control topology"));
     }
