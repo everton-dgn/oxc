@@ -6,7 +6,7 @@ import { parseModule } from "../../packages/tsrx-core-compat/dist/index.js";
 // Regression tests for the @tsrx/core 0.5.0 conformance issues tsrx-org/oxc #110, #112, #113,
 // #114, #115, #116, #117, #118, #125, #127, and #128. Every expected value below is what @tsrx/core 0.5.0 (tsrx main at
 // f78fada) returns for the same source, so a difference here is a difference from the reference
-// parser.
+// parser. The #111 tests follow @tsrx/core 0.5.2, which decodes character references in JSX text.
 
 function findAll(root, predicate) {
   const found = [];
@@ -41,13 +41,13 @@ const script = (ast) =>
     (node) => node.type === "JSXElement" && node.openingElement?.name?.name === "script",
   )[0];
 
-// Each element's children, as `[value, start, end]` for a JSXText, `["{}", start, end]` for an
+// Each element's children, as `[raw, start, end]` for a JSXText, `["{}", start, end]` for an
 // empty expression container, and the tag name for an element.
 const children = (ast) =>
   findAll(ast, (node) => node.type === "JSXElement").map((element) =>
     element.children.map((child) =>
       child.type === "JSXText"
-        ? (assert.equal(child.raw, child.value), [child.value, child.start, child.end])
+        ? [child.raw, child.start, child.end]
         : child.expression?.type === "JSXEmptyExpression"
           ? (assert.deepEqual([child.expression.start, child.expression.end], [child.start, child.end]),
             ["{}", child.start, child.end, child.expression.innerComments.map(({ type, value }) => [type, value])])
@@ -219,6 +219,100 @@ test("#110: a comment that swallows a closing tag leaves the element unclosed, a
     assert.deepEqual(strict(source), [`${unclosed("p")} (4:1)`, pos, "TSRX1001", [4, 1]], source);
     assert.deepEqual(collected(source), ["throws", "'}' expected. (4:1)", pos, "TS1005"], source);
   }
+});
+
+const attributeStrings = (ast) =>
+  findAll(ast, (node) => node.type === "JSXAttribute" && node.value?.type === "Literal").map(
+    ({ value: { value, raw, start, end } }) => ({ value, raw, start, end }),
+  );
+
+test("#111: character references in JSX text are decoded into value, and raw keeps them as written", () => {
+  const text = "a &quot;b&quot; &amp;lt; &nbsp;&#x1F600; &bogus;";
+  const value = 'a "b" &lt;  😀 &bogus;';
+  const cases = [
+    [`export function App() @{\n\t<p>${text}</p>\n}`, "App.tsrx", [{ value, raw: text, start: 29, end: 77 }]],
+    [`export function App() {\n\treturn <p>${text}</p>;\n}`, "App.tsrx", [{ value, raw: text, start: 35, end: 83 }]],
+    [`const x = <p>${text}</p>;`, "App.tsx", [{ value, raw: text, start: 13, end: 61 }]],
+    // acorn-typescript's reader: `&#X` is hexadecimal too, the `;` is at most 10 characters after
+    // the `&`, and the code point is at most U+10FFFF. Anything else is text.
+    [
+      "export function App() @{\n\t<p>&#X41;&#x0000041;&#x00000041; &#1114111;&#1114112; &amp AT&T &toString; &#x;</p>\n}",
+      "App.tsrx",
+      [
+        {
+          value: "AA&#x00000041; \u{10ffff}&#1114112; &amp AT&T &toString; &#x;",
+          raw: "&#X41;&#x0000041;&#x00000041; &#1114111;&#1114112; &amp AT&T &toString; &#x;",
+          start: 29,
+          end: 105,
+        },
+      ],
+    ],
+    // A reference whose `;` comes after a comment is text, and each piece decodes on its own.
+    [
+      "export function App() @{\n\t<p><b>&amp/* c */;</b>&lt;/* c */&gt;</p>\n}",
+      "App.tsrx",
+      [
+        { value: "&amp", raw: "&amp", start: 32, end: 36 },
+        { value: ";", raw: ";", start: 43, end: 44 },
+        { value: "<", raw: "&lt;", start: 48, end: 52 },
+        { value: ">", raw: "&gt;", start: 59, end: 63 },
+      ],
+    ],
+    [
+      "const x = <b>&amp/* c */;</b>;",
+      "App.tsx",
+      [
+        { value: "&amp", raw: "&amp", start: 13, end: 17 },
+        { value: ";", raw: ";", start: 24, end: 25 },
+      ],
+    ],
+    // value reads a CRLF line break as LF; a lone CR stays.
+    [
+      "export function App() @{\r\n\t<p>a &amp;\r\n\tb\rc</p>\r\n}",
+      "App.tsrx",
+      [{ value: "a &\n\tb\rc", raw: "a &amp;\r\n\tb\rc", start: 30, end: 43 }],
+    ],
+    [
+      "export function App() {\r\n\treturn <p>a &amp;\r\n\tb\rc</p>;\r\n}",
+      "App.tsrx",
+      [{ value: "a &\n\tb\rc", raw: "a &amp;\r\n\tb\rc", start: 36, end: 49 }],
+    ],
+  ];
+  for (const [source, filename, expected] of cases) {
+    assert.deepEqual(texts(parseModule(source, filename)), expected, JSON.stringify(source));
+  }
+});
+
+test("#111: character references in attribute strings are decoded into value, and raw keeps them as written", () => {
+  const cases = [
+    [
+      'export function App() @{\n\t<div title="a &amp;lt;b&amp;gt; &quot;q&quot; &#x2713;" />\n}',
+      "App.tsrx",
+      [{ value: 'a &lt;b&gt; "q" ✓', raw: '"a &amp;lt;b&amp;gt; &quot;q&quot; &#x2713;"', start: 37, end: 81 }],
+    ],
+    [
+      "export function App() {\n\treturn <div title='a &amp;lt;b&amp;gt; &quot;q&quot; &#x2713;' />;\n}",
+      "App.tsrx",
+      [{ value: 'a &lt;b&gt; "q" ✓', raw: "'a &amp;lt;b&amp;gt; &quot;q&quot; &#x2713;'", start: 43, end: 87 }],
+    ],
+    [
+      'const x = <div title="AT&T &bogus; &amp" />;',
+      "App.tsx",
+      [{ value: "AT&T &bogus; &amp", raw: '"AT&T &bogus; &amp"', start: 21, end: 40 }],
+    ],
+    // Unlike text, an attribute string keeps a CRLF line break in value.
+    [
+      'export function App() @{\r\n\t<div title="a &amp;\r\nb" />\r\n}',
+      "App.tsrx",
+      [{ value: "a &\r\nb", raw: '"a &amp;\r\nb"', start: 38, end: 50 }],
+    ],
+  ];
+  for (const [source, filename, expected] of cases) {
+    assert.deepEqual(attributeStrings(parseModule(source, filename)), expected, JSON.stringify(source));
+  }
+  // A JavaScript string in a `{…}` attribute is no JSX string, so it keeps `&amp;`.
+  const [literal] = findAll(parseModule('const x = <div alt={"&amp;"} />;', "App.tsx"), (node) => node.type === "Literal");
+  assert.deepEqual([literal.value, literal.raw], ["&amp;", '"&amp;"']);
 });
 
 test("#112: a non-breaking space next to a line break is text, not layout", () => {
