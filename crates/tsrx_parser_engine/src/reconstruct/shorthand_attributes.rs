@@ -12,6 +12,7 @@ use super::{
 
 pub(super) fn reconstruct_shorthand_attributes(
     tape: &mut FlatTape,
+    authored: &str,
     overlay: OverlayView<'_>,
     segments: &[ProjectionSegment],
     prefix: &str,
@@ -23,7 +24,9 @@ pub(super) fn reconstruct_shorthand_attributes(
         let mut projected = None;
         while let Some(&(_, attribute)) = attributes.get(attribute_cursor) {
             attribute_cursor += 1;
-            if !is_projected_shorthand(tape, attribute, *shorthand, segments, prefix, index)? {
+            if !is_projected_shorthand(
+                tape, authored, attribute, *shorthand, segments, prefix, index,
+            )? {
                 continue;
             }
             projected = Some(attribute);
@@ -31,6 +34,7 @@ pub(super) fn reconstruct_shorthand_attributes(
         }
         let attribute = projected
             .ok_or(TsrxParseError::Unsupported("projected shorthand attribute is missing"))?;
+        let reserved = reserved_name(authored, *shorthand)?;
         if tape.field_index(attribute, "shorthand").is_some() {
             return Err(TsrxParseError::Unsupported(
                 "projected shorthand attribute already has a shorthand field",
@@ -39,6 +43,16 @@ pub(super) fn reconstruct_shorthand_attributes(
         let name = object_field(tape, attribute, "name")?;
         let container = object_field(tape, attribute, "value")?;
         let expression = object_field(tape, container, "expression")?;
+        if let Some(name) = reserved {
+            // The projection wrote a stand-in for the reserved word, which `@tsrx/core` reads as
+            // an `Identifier` of that name.
+            let name = tape.push_json_string_scalar(name)?;
+            let name_field = tape.field_index(expression, "name").ok_or(
+                TsrxParseError::Unsupported("projected shorthand stand-in has no name field"),
+            )?;
+            tape.set_field_value(name_field, name)?;
+            record_authored_span(starts, expression, shorthand.identifier);
+        }
         let expression_name = field_value(tape, expression, "name")?;
         let name_field = tape
             .field_index(name, "name")
@@ -52,8 +66,20 @@ pub(super) fn reconstruct_shorthand_attributes(
     Ok(())
 }
 
+/// The authored name of a shorthand attribute the projection wrote a stand-in for.
+fn reserved_name(
+    authored: &str,
+    shorthand: tsrx_syntax::ParserShorthandAttribute,
+) -> Result<Option<&str>, TsrxParseError> {
+    let name = authored
+        .get(shorthand.identifier.start as usize..shorthand.identifier.end as usize)
+        .ok_or(TsrxParseError::Unsupported("shorthand attribute name is not a source boundary"))?;
+    Ok(tsrx_syntax::shorthand_name_is_reserved(name.as_bytes()).then_some(name))
+}
+
 fn is_projected_shorthand(
     tape: &FlatTape,
+    authored: &str,
     attribute: RecordIndex,
     shorthand: tsrx_syntax::ParserShorthandAttribute,
     segments: &[ProjectionSegment],
@@ -83,12 +109,15 @@ fn is_projected_shorthand(
         return Ok(false);
     }
     let expression = object_field(tape, container, "expression")?;
-    if !has_type(tape, expression, r#""Identifier""#)
-        || !mapped_object_span(tape, expression, shorthand.identifier, segments)?
-    {
+    if !has_type(tape, expression, r#""Identifier""#) {
         return Ok(false);
     }
-    Ok(true)
+    // A reserved name was written as a stand-in, which maps to no authored bytes.
+    if reserved_name(authored, shorthand)?.is_some() {
+        return Ok(scalar_field(tape, expression, "name")?
+            == format!(r#""{}""#, tsrx_syntax::SHORTHAND_RESERVED_NAME_STAND_IN));
+    }
+    mapped_object_span(tape, expression, shorthand.identifier, segments)
 }
 
 fn mapped_object_span(

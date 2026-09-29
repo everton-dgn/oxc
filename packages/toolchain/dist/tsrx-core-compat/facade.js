@@ -16,6 +16,19 @@ function parserResultProgram(result) {
 function parserResultErrors(result) {
 	return result?.type === "Program" ? EMPTY_ERRORS : result?.errors ?? EMPTY_ERRORS;
 }
+function tsrxFailure(parser, filename, source, eagerTsrx) {
+	const options = eagerTsrx ? EAGER_PARSER_OPTIONS : PARSER_OPTIONS;
+	let result;
+	try {
+		result = parser.parseSync(filename, source, options);
+	} catch (error) {
+		return isSyntaxErrorLike(error) && !isOperationalError(error) ? { error } : null;
+	}
+	return parserResultProgram(result) === null ? {
+		result,
+		options
+	} : null;
+}
 function tsrxRetry(parser, filename, source, eagerTsrx) {
 	const options = eagerTsrx ? EAGER_PARSER_OPTIONS : PARSER_OPTIONS;
 	const result = parser.parseSync(filename, source, options);
@@ -38,6 +51,9 @@ function acceptsWithoutTsrxText(parser, filename, source, result) {
 		const text = node?.type === "JSXText" && typeof node.raw === "string" && node.raw.includes(">") ? [node.start, node.end] : script ? [node.openingElement.end, node.closingElement.start] : null;
 		if (text !== null) {
 			for (let index = text[0]; index < text[1]; index += 1) if (masked[index] === ">") masked[index] = " ";
+		}
+		if (node?.type === "JSXAttribute" && node.shorthand === true) {
+			for (let index = node.start; index < node.end; index += 1) if (masked[index] !== "\n" && masked[index] !== "\r") masked[index] = " ";
 		}
 		for (const key in node) if (key !== "parent" && node[key] !== null && typeof node[key] === "object") stack.push(node[key]);
 	}
@@ -96,6 +112,9 @@ const MESSAGE_CODES = [
 	[/^Export '[^']+' is not defined$/u, "TS2304"],
 	[/^'(?:public|private|protected|readonly|override)' modifier cannot appear on a parameter\.$/u, "TS2369"],
 	[/^'[^']+' expected\.$|^Expected `[^`]*` but found |^Expected a semicolon /u, "TS1005"],
+	[/: expected `\}` after a shorthand attribute's name$/u, "TS1005"],
+	[/: expected a shorthand attribute's name or a spread `\.\.\.`$/u, "TS1012"],
+	[/: expected a JSX attribute, `>`, or `\/>`$/u, "TS1012"],
 	[/^Unexpected token$/u, "TS1012"],
 	[/^Unexpected token\. Did you mean `\{'\}'\}`/u, "TS1381"],
 	[/^Unexpected token\. Did you mean `\{'>'\}`/u, "TS1382"],
@@ -915,6 +934,10 @@ const TEXT_COMMENT = /\/\*|(?:^|[ \t\r\n])\/\//u;
 const JSX_TEXT_GT = /^Unexpected token\. Did you mean `\{'>'\}`/u;
 function rejectsJsxTextGt(errors) {
 	return errors.some((error) => typeof error?.message === "string" && JSX_TEXT_GT.test(error.message));
+}
+const SHORTHAND_ATTRIBUTE = /^Expected `\.\.\.` but found /u;
+function rejectsShorthandAttribute(errors) {
+	return errors.some((error) => typeof error?.message === "string" && SHORTHAND_ATTRIBUTE.test(error.message));
 }
 function hasTextComment(program) {
 	const stack = [program];
@@ -1940,14 +1963,22 @@ function createTsrxCoreCompat(parser) {
 				try {
 					result = parser.parseSync(resolvedFilename, source, selectedParserOptions);
 				} catch (ordinaryError) {
-					if (selectedParserOptions !== TYPESCRIPT_REACT_PARSER_OPTIONS || typeof source !== "string" || !(source.includes("@{") || TEXT_COMMENT.test(source) || rejectsJsxTextGt([ordinaryError, ...ordinaryError?.errors ?? []]))) throw ordinaryError;
+					if (selectedParserOptions !== TYPESCRIPT_REACT_PARSER_OPTIONS || typeof source !== "string" || !(source.includes("@{") || TEXT_COMMENT.test(source) || rejectsJsxTextGt([ordinaryError, ...ordinaryError?.errors ?? []]) || rejectsShorthandAttribute([ordinaryError, ...ordinaryError?.errors ?? []]))) throw ordinaryError;
+					let retry = null;
 					try {
-						const retry = tsrxRetry(parser, resolvedFilename, source, eagerTsrx);
-						if (retry === null) throw ordinaryError;
+						retry = tsrxRetry(parser, resolvedFilename, source, eagerTsrx);
+					} catch {
+						retry = null;
+					}
+					if (retry !== null) {
 						result = retry.result;
 						selectedParserOptions = retry.options;
-					} catch {
-						throw ordinaryError;
+					} else {
+						const failure = rejectsShorthandAttribute([ordinaryError, ...ordinaryError?.errors ?? []]) ? tsrxFailure(parser, resolvedFilename, source, eagerTsrx) : null;
+						if (failure?.error !== void 0) throw failure.error;
+						if (failure === null) throw ordinaryError;
+						result = failure.result;
+						selectedParserOptions = failure.options;
 					}
 				}
 			} catch (error) {
@@ -1964,13 +1995,23 @@ function createTsrxCoreCompat(parser) {
 					throw translated;
 				}
 			}
-			if (selectedParserOptions === TYPESCRIPT_REACT_PARSER_OPTIONS && typeof source === "string" && (parserResultProgram(result) === null || parserResultErrors(result).length > 0 ? source.includes("@{") || TEXT_COMMENT.test(source) || rejectsJsxTextGt(parserResultErrors(result)) : hasTextComment(parserResultProgram(result)))) try {
-				const retry = tsrxRetry(parser, resolvedFilename, source, eagerTsrx);
+			if (selectedParserOptions === TYPESCRIPT_REACT_PARSER_OPTIONS && typeof source === "string" && (parserResultProgram(result) === null || parserResultErrors(result).length > 0 ? source.includes("@{") || TEXT_COMMENT.test(source) || rejectsJsxTextGt(parserResultErrors(result)) || rejectsShorthandAttribute(parserResultErrors(result)) : hasTextComment(parserResultProgram(result)))) {
+				let retry = null;
+				try {
+					retry = tsrxRetry(parser, resolvedFilename, source, eagerTsrx);
+				} catch {}
 				if (retry !== null) {
 					result = retry.result;
 					selectedParserOptions = retry.options;
+				} else if (rejectsShorthandAttribute(parserResultErrors(result))) {
+					const failure = tsrxFailure(parser, resolvedFilename, source, eagerTsrx);
+					if (failure?.error !== void 0) throw failure.error;
+					if (failure !== null) {
+						result = failure.result;
+						selectedParserOptions = failure.options;
+					}
 				}
-			} catch {}
+			}
 			if (parserResultProgram(result) === null) {
 				const notExpression = parserResultErrors(result).find(isDynamicTagNotExpression);
 				if (notExpression !== void 0) throw dynamicTagNotExpressionError(notExpression, positions());

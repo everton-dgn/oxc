@@ -219,6 +219,7 @@ fn parse_tsrx_utf8_source_once<W: Utf16WorkObserver>(
         && overlay_view.script_blocks.is_empty()
         && overlay_view.jsx_text_comments.is_empty()
         && overlay_view.jsx_text_gts.is_empty()
+        && overlay_view.parser_shorthand_attributes.is_empty()
     {
         return parse_direct(
             source,

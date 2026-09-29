@@ -120,6 +120,7 @@ pub(crate) fn reconstruct_projected(
     reconstruct_dynamic_tags(tape, authored, overlay, segments, prefix, &parents, &mut starts)?;
     reconstruct_shorthand_attributes(
         tape,
+        authored,
         overlay,
         segments,
         prefix,

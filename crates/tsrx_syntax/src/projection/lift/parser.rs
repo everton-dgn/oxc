@@ -1,4 +1,7 @@
-use crate::{diagnostics::ProjectionError, model::ParserCodeBlockKind};
+use crate::{
+    diagnostics::ProjectionError,
+    model::{ParserCodeBlockKind, shorthand_name_is_reserved},
+};
 
 use super::{
     super::format::FormatProjection,
@@ -118,7 +121,19 @@ fn lift_shorthand(
     if source.as_bytes().get(expression) != Some(&b'{') {
         return Err(ProjectionError::ScaffoldMismatch { index });
     }
-    replace_range(source, marker.start, end, "", index)
+    let name =
+        projection.shorthand_names.get(index).ok_or(ProjectionError::ScaffoldMismatch { index })?;
+    let source = if shorthand_name_is_reserved(name.as_bytes()) {
+        // The projection wrote a marker for the reserved word, inside this attribute's braces.
+        let stand_in = unique_marker(source, &format!("{}U{index}_", projection.prefix), index)?;
+        if stand_in.start < expression {
+            return Err(ProjectionError::ScaffoldMismatch { index });
+        }
+        replace_range(source, stand_in.start, stand_in.end, name, index)?
+    } else {
+        source.to_owned()
+    };
+    replace_range(&source, marker.start, end, "", index)
 }
 
 fn unique_marker(

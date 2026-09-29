@@ -35,6 +35,21 @@ function parserResultErrors(result) {
   return result?.type === "Program" ? EMPTY_ERRORS : (result?.errors ?? EMPTY_ERRORS);
 }
 
+// A `.tsx` or `.jsx` file the TSX lane rejected at a shorthand attribute's `{`, and the TSRX lane
+// rejects too, fails as `@tsrx/core` fails it: core reads every JSX file with the TSRX grammar,
+// so its error is the TSRX lane's (`<a {a.b} />` is its `'}' expected`, not TSX's missing `...`).
+// Returns the TSRX lane's failed result or thrown error, or null where the TSRX lane parses.
+function tsrxFailure(parser, filename, source, eagerTsrx) {
+  const options = eagerTsrx ? EAGER_PARSER_OPTIONS : PARSER_OPTIONS;
+  let result;
+  try {
+    result = parser.parseSync(filename, source, options);
+  } catch (error) {
+    return isSyntaxErrorLike(error) && !isOperationalError(error) ? { error } : null;
+  }
+  return parserResultProgram(result) === null ? { result, options } : null;
+}
+
 function tsrxRetry(parser, filename, source, eagerTsrx) {
   const options = eagerTsrx ? EAGER_PARSER_OPTIONS : PARSER_OPTIONS;
   const result = parser.parseSync(filename, source, options);
@@ -47,9 +62,9 @@ function tsrxRetry(parser, filename, source, eagerTsrx) {
   return { result, options };
 }
 
-// The TSRX lane runs none of OXC's semantic checks, so a retry made for text comments or a `>` in
-// JSX text wins only where the TSX lane accepts the same source with each of those comments, and
-// each such `>`, blanked out.
+// The TSRX lane runs none of OXC's semantic checks, so a retry made for text comments, a `>` in
+// JSX text, or a shorthand attribute wins only where the TSX lane accepts the same source with
+// each of those comments, each such `>`, and each shorthand attribute blanked out.
 function acceptsWithoutTsrxText(parser, filename, source, result) {
   const masked = source.split("");
   const stack = [parserResultProgram(result)];
@@ -75,6 +90,11 @@ function acceptsWithoutTsrxText(parser, filename, source, result) {
     if (text !== null) {
       for (let index = text[0]; index < text[1]; index += 1) {
         if (masked[index] === ">") masked[index] = " ";
+      }
+    }
+    if (node?.type === "JSXAttribute" && node.shorthand === true) {
+      for (let index = node.start; index < node.end; index += 1) {
+        if (masked[index] !== "\n" && masked[index] !== "\r") masked[index] = " ";
       }
     }
     for (const key in node) {
@@ -180,6 +200,11 @@ const MESSAGE_CODES: Array<[RegExp, string]> = [
   [/^Export '[^']+' is not defined$/u, "TS2304"],
   [/^'(?:public|private|protected|readonly|override)' modifier cannot appear on a parameter\.$/u, "TS2369"],
   [/^'[^']+' expected\.$|^Expected `[^`]*` but found |^Expected a semicolon /u, "TS1005"],
+  // A malformed shorthand attribute, `<a {a.b} />` or `<a {} />`, where core expects its `}` or
+  // reads an unexpected token (tsrx-org/oxc#148).
+  [/: expected `\}` after a shorthand attribute's name$/u, "TS1005"],
+  [/: expected a shorthand attribute's name or a spread `\.\.\.`$/u, "TS1012"],
+  [/: expected a JSX attribute, `>`, or `\/>`$/u, "TS1012"],
   [/^Unexpected token$/u, "TS1012"],
   [/^Unexpected token\. Did you mean `\{'\}'\}`/u, "TS1381"],
   [/^Unexpected token\. Did you mean `\{'>'\}`/u, "TS1382"],
@@ -1152,6 +1177,17 @@ const JSX_TEXT_GT = /^Unexpected token\. Did you mean `\{'>'\}`/u;
 
 function rejectsJsxTextGt(errors) {
   return errors.some((error) => typeof error?.message === "string" && JSX_TEXT_GT.test(error.message));
+}
+
+// `@tsrx/core` 0.5.2 reads `{name}` in attribute position as the shorthand attribute
+// `name={name}`, `.tsx` and `.jsx` included, where OXC's TSX grammar expects a spread
+// (tsrx-org/oxc#148). A file the TSX lane rejects for that takes the TSRX lane.
+const SHORTHAND_ATTRIBUTE = /^Expected `\.\.\.` but found /u;
+
+function rejectsShorthandAttribute(errors) {
+  return errors.some(
+    (error) => typeof error?.message === "string" && SHORTHAND_ATTRIBUTE.test(error.message),
+  );
 }
 
 function hasTextComment(program) {
@@ -2467,22 +2503,34 @@ export function createTsrxCoreCompat(parser) {
             !(
               source.includes("@{") ||
               TEXT_COMMENT.test(source) ||
-              rejectsJsxTextGt([ordinaryError, ...(ordinaryError?.errors ?? [])])
+              rejectsJsxTextGt([ordinaryError, ...(ordinaryError?.errors ?? [])]) ||
+              rejectsShorthandAttribute([ordinaryError, ...(ordinaryError?.errors ?? [])])
             )
           ) {
             throw ordinaryError;
           }
 
+          let retry = null;
           try {
-            const retry = tsrxRetry(parser, resolvedFilename, source, eagerTsrx);
-            if (retry === null) throw ordinaryError;
+            retry = tsrxRetry(parser, resolvedFilename, source, eagerTsrx);
+          } catch {
+            retry = null;
+          }
+          if (retry !== null) {
             result = retry.result;
             selectedParserOptions = retry.options;
-          } catch {
+          } else {
             // A valid ordinary TSX parse always wins. If both lanes reject the source, preserve
             // the ordinary parser's diagnostic instead of guessing from comments, JSX text,
-            // string contents, or regular-expression bodies that happen to contain `@{`.
-            throw ordinaryError;
+            // string contents, or regular-expression bodies that happen to contain `@{`; only a
+            // rejected shorthand attribute takes the TSRX lane's diagnostic, as core reports it.
+            const failure = rejectsShorthandAttribute([ordinaryError, ...(ordinaryError?.errors ?? [])])
+              ? tsrxFailure(parser, resolvedFilename, source, eagerTsrx)
+              : null;
+            if (failure?.error !== undefined) throw failure.error;
+            if (failure === null) throw ordinaryError;
+            result = failure.result;
+            selectedParserOptions = failure.options;
           }
         }
       } catch (error) {
@@ -2516,17 +2564,26 @@ export function createTsrxCoreCompat(parser) {
         (parserResultProgram(result) === null || parserResultErrors(result).length > 0
           ? source.includes("@{") ||
             TEXT_COMMENT.test(source) ||
-            rejectsJsxTextGt(parserResultErrors(result))
+            rejectsJsxTextGt(parserResultErrors(result)) ||
+            rejectsShorthandAttribute(parserResultErrors(result))
           : hasTextComment(parserResultProgram(result)))
       ) {
+        let retry = null;
         try {
-          const retry = tsrxRetry(parser, resolvedFilename, source, eagerTsrx);
-          if (retry !== null) {
-            result = retry.result;
-            selectedParserOptions = retry.options;
-          }
+          retry = tsrxRetry(parser, resolvedFilename, source, eagerTsrx);
         } catch {
           // Preserve the ordinary result unless TSRX produces a complete successful Program.
+        }
+        if (retry !== null) {
+          result = retry.result;
+          selectedParserOptions = retry.options;
+        } else if (rejectsShorthandAttribute(parserResultErrors(result))) {
+          const failure = tsrxFailure(parser, resolvedFilename, source, eagerTsrx);
+          if (failure?.error !== undefined) throw failure.error;
+          if (failure !== null) {
+            result = failure.result;
+            selectedParserOptions = failure.options;
+          }
         }
       }
 

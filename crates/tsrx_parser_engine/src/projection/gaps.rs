@@ -197,14 +197,24 @@ fn build_allowed_gaps(
         text_gt_gaps.push(ByteSpan::new(gt, gt + 1));
     }
 
+    // It writes a stand-in for a shorthand attribute's name that is a reserved word.
+    let mut shorthand_gaps = Vec::new();
+    for attribute in overlay.parser_shorthand_attributes {
+        let name = slice(source, attribute.identifier.start, attribute.identifier.end)?;
+        if tsrx_syntax::shorthand_name_is_reserved(name.as_bytes()) {
+            shorthand_gaps.push(attribute.identifier);
+        }
+    }
+
     let streams = [
         token_gaps.as_slice(),
         header_gaps.as_slice(),
         dynamic_gaps.as_slice(),
         embedded_gaps.as_slice(),
         text_gt_gaps.as_slice(),
+        shorthand_gaps.as_slice(),
     ];
-    let mut cursors = [0_usize; 5];
+    let mut cursors = [0_usize; 6];
     let total = streams.iter().map(|stream| stream.len()).sum();
     let mut merged = Vec::with_capacity(total);
     loop {

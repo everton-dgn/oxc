@@ -15,8 +15,9 @@ pub(super) fn validate_projection_lane(overlay: &Overlay) -> Result<(), Projecti
 fn validate_parser_shorthand_attributes(overlay: &Overlay) -> Result<(), ProjectionError> {
     let mut previous_end = None;
     for attribute in &overlay.parser_shorthand_attributes {
-        if attribute.span.start.saturating_add(1) != attribute.identifier.start
-            || attribute.identifier.end.saturating_add(1) != attribute.span.end
+        if attribute.span.start >= attribute.identifier.start
+            || attribute.identifier.start >= attribute.identifier.end
+            || attribute.identifier.end >= attribute.span.end
             || attribute.span.end > overlay.source_len
             || previous_end.is_some_and(|end| end > attribute.span.start)
         {

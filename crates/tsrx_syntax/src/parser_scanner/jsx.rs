@@ -15,6 +15,11 @@ use super::lexical::identifier_continue_width;
 use super::lexical::unsupported_at_construct;
 use super::surrogates::OpaqueSurrogateContext;
 
+/// What a shorthand attribute's `{` is missing when no identifier name follows it.
+const SHORTHAND_ATTRIBUTE_NAME: &str = "a shorthand attribute's name or a spread `...`";
+/// What a shorthand attribute's name is missing when anything but `}` follows it.
+const SHORTHAND_ATTRIBUTE_CLOSE: &str = "`}` after a shorthand attribute's name";
+
 impl Scanner<'_> {
     #[expect(
         clippy::too_many_lines,
@@ -140,18 +145,23 @@ impl Scanner<'_> {
                         index = self.skip_jsx_quote(index, byte)?;
                         expecting_attribute_value = false;
                     }
-                    b'{' => {
-                        let shorthand_start = index;
-                        index = self.scan_expression_region(index + 1, Some(b'}'))?;
-                        if !expecting_attribute_value
-                            && let Some(identifier) =
-                                self.jsx_shorthand_identifier(shorthand_start, index)
-                        {
+                    // In attribute position a `{` opens a spread, `{...props}`, or a shorthand
+                    // attribute, `{name}`, which `@tsrx/core` reads as `name={name}` in every JSX.
+                    b'{' if !expecting_attribute_value => {
+                        let inner = self.skip_trivia(index + 1)?;
+                        if self.bytes.get(inner..inner + 3) == Some(b"...") {
+                            index = self.scan_expression_region(index + 1, Some(b'}'))?;
+                        } else {
+                            let (identifier, end) = self.shorthand_attribute_name(inner)?;
                             self.parser_shorthand_attributes.push(ParserShorthandAttribute {
-                                span: ByteSpan::new(to_u32(shorthand_start)?, to_u32(index)?),
+                                span: ByteSpan::new(to_u32(index)?, to_u32(end)?),
                                 identifier,
                             });
+                            index = end;
                         }
+                    }
+                    b'{' => {
+                        index = self.scan_expression_region(index + 1, Some(b'}'))?;
                         expecting_attribute_value = false;
                     }
                     b'/' if self.bytes.get(index + 1) == Some(&b'*') => {
@@ -605,20 +615,70 @@ impl Scanner<'_> {
         Ok(())
     }
 
-    fn jsx_shorthand_identifier(&self, start: usize, end: usize) -> Option<ByteSpan> {
-        let identifier_start = start.checked_add(1)?;
-        let identifier_end = end.checked_sub(1)?;
-        if self.bytes.get(start) != Some(&b'{')
-            || self.bytes.get(identifier_end) != Some(&b'}')
-            || self.identifier_start_width(identifier_start).is_none()
-            || self.skip_identifier(identifier_start) != identifier_end
-        {
-            return None;
+    /// Reads a shorthand attribute's name at `start`, past the trivia after its `{`, and the trivia
+    /// up to its `}`. Returns the name's span and the offset after the `}`.
+    ///
+    /// `@tsrx/core` takes any identifier name, a reserved word or one with `\u` escapes included,
+    /// except `enum`, `interface`, and `type`. Anything else is its `Unexpected token` (TS1012)
+    /// at the name, and a name followed by anything but trivia and `}` is its `'}' expected`
+    /// (TS1005) where the `}` should be.
+    fn shorthand_attribute_name(&self, start: usize) -> Result<(ByteSpan, usize), ProjectionError> {
+        let end = self.skip_identifier_name(start);
+        if end == start || matches!(&self.bytes[start..end], b"enum" | b"interface" | b"type") {
+            return Err(ProjectionError::MalformedSyntax {
+                offset: to_u32(start)?,
+                expected: SHORTHAND_ATTRIBUTE_NAME,
+            });
         }
-        Some(ByteSpan::new(
-            u32::try_from(identifier_start).ok()?,
-            u32::try_from(identifier_end).ok()?,
-        ))
+        let close = self.skip_trivia(end)?;
+        if self.bytes.get(close) != Some(&b'}') {
+            return Err(ProjectionError::MalformedSyntax {
+                offset: to_u32(close)?,
+                expected: SHORTHAND_ATTRIBUTE_CLOSE,
+            });
+        }
+        Ok((ByteSpan::new(to_u32(start)?, to_u32(end)?), close + 1))
+    }
+
+    /// Skips an identifier name, with any `\u` escapes in it, and returns where it ends.
+    fn skip_identifier_name(&self, start: usize) -> usize {
+        let mut index = start;
+        loop {
+            let width = if index == start {
+                self.identifier_start_width(index)
+            } else {
+                self.identifier_continue_width(index)
+            };
+            if let Some(width) = width {
+                index += width;
+                continue;
+            }
+            if self.bytes.get(index..index + 2) != Some(b"\\u") {
+                return index;
+            }
+            let digits = index + 2;
+            let end = if self.bytes.get(digits) == Some(&b'{') {
+                let close = self.bytes[digits + 1..]
+                    .iter()
+                    .position(|byte| !byte.is_ascii_hexdigit())
+                    .map(|length| digits + 1 + length);
+                match close {
+                    Some(close) if close > digits + 1 && self.bytes.get(close) == Some(&b'}') => {
+                        close + 1
+                    }
+                    _ => return index,
+                }
+            } else if self
+                .bytes
+                .get(digits..digits + 4)
+                .is_some_and(|hex| hex.iter().all(u8::is_ascii_hexdigit))
+            {
+                digits + 4
+            } else {
+                return index;
+            };
+            index = end;
+        }
     }
 
     fn skip_jsx_name(&self, mut index: usize) -> usize {

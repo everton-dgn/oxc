@@ -11,8 +11,12 @@ enum EdgeRole {
     NameOnly,
     SuperCall,
     SuperProperty,
-    MethodFunction { super_call: bool },
+    MethodFunction {
+        super_call: bool,
+    },
     ObjectMethodFunction,
+    /// A shorthand attribute's `{name}` container, whose identifier is the attribute's name.
+    ShorthandValue,
 }
 
 // A compact copyable traversal state is faster and clearer here than repeatedly
@@ -91,6 +95,7 @@ enum NodeKind {
     JsxForExpression,
     JsxSwitchExpression,
     JsxTryExpression,
+    JsxAttribute,
     Other,
 }
 
@@ -243,12 +248,31 @@ impl<'tape> Validator<'tape> {
         context: Context,
         role: EdgeRole,
     ) -> Result<(), TsrxParseError> {
-        let (kind, fields, generic_visited) = self.classify_object(object, context);
+        let (kind, fields, generic_visited) = self.classify_object(object, context, role);
         self.span_fields[index_of(object)?] = fields;
         match kind {
+            // `@tsrx/core` reads `{name}` as `name={name}` for any identifier name, `{await}` and
+            // `{yield}` included, so the container's identifier is a name, not a reference.
+            NodeKind::Other if role == EdgeRole::ShorthandValue => {
+                for field in self.tape.fields(object) {
+                    self.push(field.value, context, EdgeRole::NameOnly);
+                }
+                Ok(())
+            }
             NodeKind::Program | NodeKind::Other => {
                 if !generic_visited {
                     self.visit_generic(object, context);
+                }
+                Ok(())
+            }
+            NodeKind::JsxAttribute => {
+                let shorthand = scalar_field_is(self.tape, object, "shorthand", "true");
+                for field in self.tape.fields(object) {
+                    let role = match self.tape.key(field) {
+                        "value" if shorthand => EdgeRole::ShorthandValue,
+                        _ => EdgeRole::Normal,
+                    };
+                    self.push(field.value, context, role);
                 }
                 Ok(())
             }
@@ -801,6 +825,7 @@ impl<'tape> Validator<'tape> {
         &mut self,
         object: RecordIndex,
         context: Context,
+        role: EdgeRole,
     ) -> (NodeKind, SpanFields, bool) {
         let mut kind = None;
         let mut span_fields = SpanFields::default();
@@ -809,7 +834,9 @@ impl<'tape> Validator<'tape> {
             let name = self.tape.key(field);
             if name == "type" {
                 kind = self.tape.scalar(field.value);
-                if offset == 0 && matches!(classify_kind(kind), NodeKind::Program | NodeKind::Other)
+                if offset == 0
+                    && role != EdgeRole::ShorthandValue
+                    && matches!(classify_kind(kind), NodeKind::Program | NodeKind::Other)
                 {
                     generic_visited = true;
                 }
@@ -990,6 +1017,7 @@ fn classify_kind(kind: Option<&str>) -> NodeKind {
             r#""JSXForExpression""# => NodeKind::JsxForExpression,
             r#""JSXSwitchExpression""# => NodeKind::JsxSwitchExpression,
             r#""JSXTryExpression""# => NodeKind::JsxTryExpression,
+            r#""JSXAttribute""# => NodeKind::JsxAttribute,
             _ => NodeKind::Other,
         },
     }
