@@ -4,7 +4,7 @@ use crate::{
     diagnostics::{ProjectionError, to_u32},
     model::{
         ByteSpan, ClauseRole, ControlContext, ControlKind, EmbeddedKind, NONE, Overlay,
-        ParserCodeBlockKind, StructuralKind,
+        PARSER_JSX_TEXT_GT_STAND_IN, ParserCodeBlockKind, StructuralKind,
     },
 };
 
@@ -58,6 +58,8 @@ impl Action {
 pub(super) struct BuiltProjection {
     pub(super) mapped: MappedProjection,
     pub(super) prefix: String,
+    /// What the projection wrote for each `>` in JSX text.
+    pub(super) gt_stand_in: char,
     pub(super) wrappers: Vec<WrapperManifest>,
     pub(super) headers: Vec<HeaderManifest>,
     pub(super) tries: Vec<TryManifest>,
@@ -74,6 +76,10 @@ struct Builder<'a> {
     cursor: usize,
     /// Next unwritten entry of `overlay.jsx_text_comments`.
     text_comment: usize,
+    /// Next unwritten entry of `overlay.jsx_text_gts`.
+    text_gt: usize,
+    /// What this lane writes for a `>` in JSX text, which TSX rejects: see [`text_gt_stand_in`].
+    gt_stand_in: char,
     /// The last dynamic tag expression or closing tag written as a whole. The overlay entries
     /// nested inside it were written with it, so they are skipped.
     consumed: ByteSpan,
@@ -88,6 +94,7 @@ impl<'a> Builder<'a> {
         prefix: &'a str,
         record_segments: bool,
         type_semantic: bool,
+        gt_stand_in: char,
     ) -> Self {
         Self {
             source,
@@ -115,6 +122,8 @@ impl<'a> Builder<'a> {
             type_semantic,
             cursor: 0,
             text_comment: 0,
+            text_gt: 0,
+            gt_stand_in,
             consumed: ByteSpan::default(),
             dynamic_ordinals: Vec::new(),
         }
@@ -122,7 +131,9 @@ impl<'a> Builder<'a> {
 
     fn finish(mut self) -> Result<MappedProjection, ProjectionError> {
         self.copy_to(self.source.len())?;
-        if self.text_comment != self.overlay.jsx_text_comments.len() {
+        if self.text_comment != self.overlay.jsx_text_comments.len()
+            || self.text_gt != self.overlay.jsx_text_gts.len()
+        {
             return Err(ProjectionError::StructuralMismatch);
         }
         Ok(MappedProjection {
@@ -157,6 +168,7 @@ impl<'a> Builder<'a> {
     /// Copies an authored span. A JavaScript comment in JSX text inside it is written in braces,
     /// `{/* ... */}` or `{// ...` and a line break, the empty child TSX reads as a comment. The
     /// formatter lane marks each one after its opener, so the lift can take the braces off again.
+    /// A `>` in JSX text is written as the lane's stand-in, which TSX reads as text.
     fn copy_original_with_fixability(
         &mut self,
         span: ByteSpan,
@@ -164,10 +176,31 @@ impl<'a> Builder<'a> {
     ) -> Result<(), ProjectionError> {
         let overlay = self.overlay;
         let mut start = span.start;
-        while let Some(comment) = overlay.jsx_text_comments.get(self.text_comment).copied() {
-            if comment.start >= span.end {
-                break;
+        loop {
+            let comment = overlay
+                .jsx_text_comments
+                .get(self.text_comment)
+                .copied()
+                .filter(|comment| comment.start < span.end);
+            let gt = overlay
+                .jsx_text_gts
+                .get(self.text_gt)
+                .copied()
+                .filter(|gt| *gt < span.end)
+                .filter(|gt| comment.is_none_or(|comment| *gt < comment.start));
+            if let Some(gt) = gt {
+                if gt < start || self.source.as_bytes().get(gt as usize) != Some(&b'>') {
+                    return Err(ProjectionError::StructuralMismatch);
+                }
+                self.copy_plain(ByteSpan::new(start, gt), fixable)?;
+                self.output.push(self.gt_stand_in);
+                self.text_gt += 1;
+                start = gt + 1;
+                continue;
             }
+            let Some(comment) = comment else {
+                break;
+            };
             if comment.start < start || comment.end > span.end {
                 return Err(ProjectionError::StructuralMismatch);
             }
@@ -744,6 +777,9 @@ impl<'a> Builder<'a> {
         {
             self.text_comment += 1;
         }
+        while self.overlay.jsx_text_gts.get(self.text_gt).is_some_and(|gt| *gt < span.end) {
+            self.text_gt += 1;
+        }
         Ok(())
     }
 
@@ -914,6 +950,7 @@ pub(super) fn build_projection_with_purpose(
         });
     }
     let prefix = collision_free_prefix(source)?;
+    let gt_stand_in = text_gt_stand_in(source, overlay, record_segments)?;
     let (wrapper_actions, wrappers) = build_wrapper_actions(overlay)?;
 
     let (try_end_actions, tries) = build_try_actions(source, overlay)?;
@@ -934,6 +971,7 @@ pub(super) fn build_projection_with_purpose(
         &prefix,
         record_segments,
         purpose == ProjectionPurpose::Types,
+        gt_stand_in,
     );
     // Only a tag with its own opening token is written, so the scaffolds are numbered densely.
     let mut dynamic_offsets = Vec::new();
@@ -970,7 +1008,25 @@ pub(super) fn build_projection_with_purpose(
         mapped.dynamic_count = to_u32(dynamic_offsets.len())?;
         mapped.dynamic_offsets = dynamic_offsets;
     }
-    Ok(BuiltProjection { mapped, prefix, wrappers, headers, tries })
+    Ok(BuiltProjection { mapped, prefix, gt_stand_in, wrappers, headers, tries })
+}
+
+/// What a projection writes for each `>` in JSX text, which TSX rejects and `@tsrx/core` reads as
+/// text: a character TSX reads as text too. The lint and type lanes map only authored segments
+/// back, so they write the parser's one-byte stand-in. The formatter lane's lift has to find each
+/// one again after Oxfmt moved it, so it writes a private-use character the source never holds.
+fn text_gt_stand_in(
+    source: &str,
+    overlay: &Overlay,
+    record_segments: bool,
+) -> Result<char, ProjectionError> {
+    let parser = PARSER_JSX_TEXT_GT_STAND_IN.chars().next().unwrap_or('-');
+    if record_segments || overlay.jsx_text_gts.is_empty() {
+        return Ok(parser);
+    }
+    ('\u{E000}'..='\u{F8FF}')
+        .find(|candidate| !source.contains(*candidate))
+        .ok_or(ProjectionError::MarkerSpaceExhausted)
 }
 
 fn build_wrapper_actions(

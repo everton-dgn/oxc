@@ -15,6 +15,7 @@ mod dynamic_tags;
 mod edits;
 mod if_chain;
 mod jsx_statements;
+mod jsx_text;
 mod loops;
 mod objects;
 mod program;
@@ -26,6 +27,7 @@ mod style;
 mod switch;
 mod try_catch;
 
+pub(super) use jsx_text::restore_jsx_text_gts;
 pub(super) use program::reconstruct_projected;
 pub(super) use spans::finalize_reachable_spans;
 

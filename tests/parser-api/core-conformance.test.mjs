@@ -6,7 +6,7 @@ import { parseModule } from "../../packages/tsrx-core-compat/dist/index.js";
 // Regression tests for the @tsrx/core 0.5.0 conformance issues tsrx-org/oxc #110, #112, #113,
 // #114, #115, #116, #117, #118, #125, #127, and #128. Every expected value below is what @tsrx/core 0.5.0 (tsrx main at
 // f78fada) returns for the same source, so a difference here is a difference from the reference
-// parser. The #111 tests at the end take theirs from @tsrx/core 0.5.2.
+// parser. The #111, #145, and #146 tests at the end take theirs from @tsrx/core 0.5.2.
 
 function findAll(root, predicate) {
   const found = [];
@@ -1053,4 +1053,190 @@ test("#111: the native parser keeps its JSX strings as written; only the compat 
       filename,
     );
   }
+});
+
+// #145 and #146: text core reads where TSX would not. Each element's and fragment's children in
+// source order, `[value, raw, start, end]` for a text and `[type, start, end]` for anything else.
+const childShapes = (ast) =>
+  findAll(ast, (node) => node.type === "JSXElement" || node.type === "JSXFragment")
+    .sort((left, right) => left.start - right.start)
+    .map((element) =>
+      element.children.map((child) =>
+        child.type === "JSXText"
+          ? [child.value, child.raw, child.start, child.end]
+          : [child.type, child.start, child.end],
+      ),
+    );
+
+const everyJsxFile = ["App.tsrx", "App.tsx", "App.jsx"];
+
+test("#145: a `>` in JSX text is text, in every JSX and every JSX file", () => {
+  const cases = [
+    [inTemplate, [[["a > b", "a > b", 29, 34]]]],
+    [inFunction, [[["a > b", "a > b", 35, 40]]]],
+    [inModule, [[["a > b", "a > b", 14, 19]]]],
+  ];
+  for (const filename of everyJsxFile) {
+    for (const [wrap, expected] of cases) {
+      assert.deepEqual(childShapes(parseModule(wrap("<p>a > b</p>"), filename)), expected, filename);
+    }
+  }
+});
+
+test("#145: a `>` at a text's edges, beside comments, children, entities, and line breaks", () => {
+  for (const filename of everyJsxFile) {
+    assert.deepEqual(
+      childShapes(parseModule(inFunction("<div>>/* c */>{x}>>a<b />></div>"), filename)),
+      [
+        [
+          [">", ">", 37, 38],
+          ["JSXExpressionContainer", 38, 45],
+          [">", ">", 45, 46],
+          ["JSXExpressionContainer", 46, 49],
+          [">>a", ">>a", 49, 52],
+          ["JSXElement", 52, 57],
+          [">", ">", 57, 58],
+        ],
+        [],
+      ],
+      filename,
+    );
+    assert.deepEqual(
+      childShapes(parseModule(inModule("<div>a > <b>c > d</b> > e</div>"), filename)),
+      [
+        [
+          ["a > ", "a > ", 16, 20],
+          ["JSXElement", 20, 32],
+          [" > e", " > e", 32, 36],
+        ],
+        [["c > d", "c > d", 23, 28]],
+      ],
+      filename,
+    );
+    assert.deepEqual(
+      childShapes(parseModule(inModule("<p>&gt; > &amp;></p>"), filename)),
+      [[["> > &>", "&gt; > &amp;>", 14, 27]]],
+      filename,
+    );
+    assert.deepEqual(
+      childShapes(parseModule(inModule("<>-> =></>"), filename)),
+      [[["-> =>", "-> =>", 13, 18]]],
+      filename,
+    );
+    assert.deepEqual(
+      childShapes(parseModule(inModule("<p>\r\n>\r\n</p>"), filename)),
+      [[["\n>\n", "\r\n>\r\n", 14, 19]]],
+      filename,
+    );
+    assert.deepEqual(
+      childShapes(parseModule(inModule("<p>😀>é</p>"), filename)),
+      [[["😀>é", "😀>é", 14, 18]]],
+      filename,
+    );
+  }
+});
+
+test("#145: a `>` in text in every control-flow body", () => {
+  const ast = parseModule(
+    inTemplate(
+      "<div>@if (a) {<p>a > b</p>} @else {<p>c > d</p>}" +
+        "@for (const v of vs) {<li>e > f</li>} @empty {<li>g > h</li>}" +
+        "@try {<p>i > j</p>} @pending {<p>k > l</p>} @catch (e) {<p>m > n</p>}" +
+        "@switch (k) {@case 1: {<p>o > p</p>} @default: {<p>q > r</p>}}</div>",
+    ),
+    "App.tsrx",
+  );
+  assert.deepEqual(childShapes(ast), [
+    [
+      ["JSXIfExpression", 31, 74],
+      ["JSXForExpression", 74, 135],
+      ["JSXTryExpression", 135, 204],
+      ["JSXSwitchExpression", 204, 266],
+    ],
+    [["a > b", "a > b", 43, 48]],
+    [["c > d", "c > d", 64, 69]],
+    [["e > f", "e > f", 100, 105]],
+    [["g > h", "g > h", 124, 129]],
+    [["i > j", "i > j", 144, 149]],
+    [["k > l", "k > l", 168, 173]],
+    [["m > n", "m > n", 194, 199]],
+    [["o > p", "o > p", 230, 235]],
+    [["q > r", "q > r", 255, 260]],
+  ]);
+});
+
+test("#145: a `>` in a .tsx script body leaves the element no children, as in core", () => {
+  for (const filename of everyJsxFile) {
+    assert.deepEqual(childShapes(parseModule(inModule("<script>a > b</script>"), filename)), [[]], filename);
+  }
+});
+
+test("#145: a `>` outside JSX text is still an operator or a type argument's end", () => {
+  const ast = parseModule(
+    "const m = new Map<string, number>();\nconst f = <T,>(a: T) => m.size > 0 && <p>{a} > 0</p>;\nexport { f };",
+    "App.tsx",
+  );
+  assert.deepEqual(childShapes(ast), [[["JSXExpressionContainer", 78, 81], [" > 0", " > 0", 81, 85]]]);
+  assert.equal(findAll(ast, (node) => node.type === "BinaryExpression" && node.operator === ">").length, 1);
+});
+
+test("#145: the native TSRX parser keeps a `>` in text as written", async () => {
+  const { parseSync } = await import("../../packages/toolchain/dist/parser.js");
+  const { program, errors } = parseSync("App.tsrx", "const a = <p>>a > b<i />></p>;");
+  assert.deepEqual(errors, []);
+  assert.deepEqual(
+    findAll(program, (node) => node.type === "JSXText").map(({ value, raw, start, end }) => [value, raw, start, end]),
+    [
+      [">a > b", ">a > b", 13, 19],
+      [">", ">", 24, 25],
+    ],
+  );
+});
+
+test("#146: @empty, @case, @default, @else, @catch, and @pending in JSX text are text", () => {
+  for (const filename of everyJsxFile) {
+    for (const word of ["empty", "case", "default", "else", "catch", "pending"]) {
+      assert.deepEqual(
+        childShapes(parseModule(inTemplate(`<code>@${word}</code>`), filename)),
+        [[[`@${word}`, `@${word}`, 32, 32 + word.length + 1]]],
+        `${filename} @${word}`,
+      );
+    }
+    assert.deepEqual(
+      childShapes(
+        parseModule(inFunction("<p>me@else.com @empty@pending @catch (e) {x} @case (1): y @default:</p>"), filename),
+      ),
+      [
+        [
+          ["me@else.com @empty@pending @catch (e) ", "me@else.com @empty@pending @catch (e) ", 35, 73],
+          ["JSXExpressionContainer", 73, 76],
+          [" @case (1): y @default:", " @case (1): y @default:", 76, 99],
+        ],
+      ],
+      filename,
+    );
+    assert.deepEqual(
+      childShapes(parseModule(inModule("<p>@elsewhere @emptyish @if @for x</p>"), filename)),
+      [[["@elsewhere @emptyish @if @for x", "@elsewhere @emptyish @if @for x", 14, 45]]],
+      filename,
+    );
+  }
+});
+
+test("#146: a branch keyword that no control owns is text, and one a control owns is its branch", () => {
+  assert.deepEqual(childShapes(parseModule(inTemplate("<div>@if (a) {<b />} text @else {<i />}</div>"), "App.tsrx")), [
+    [
+      ["JSXIfExpression", 31, 46],
+      [" text @else ", " text @else ", 46, 58],
+      ["JSXExpressionContainer", 58, 65],
+    ],
+    [],
+    [],
+  ]);
+  assert.deepEqual(
+    childShapes(parseModule(inTemplate("<div>@if (a) {<p>@else</p>} @else {<p>@empty</p>}</div>"), "App.tsrx")),
+    [[["JSXIfExpression", 31, 75]], [["@else", "@else", 43, 48]], [["@empty", "@empty", 64, 70]]],
+  );
+  // Outside JSX text, a branch with no owner is still an error.
+  assert.throws(() => parseModule(inTemplate("@else {<p />}"), "App.tsrx"));
 });

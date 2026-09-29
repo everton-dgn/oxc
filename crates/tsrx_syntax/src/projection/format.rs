@@ -107,6 +107,10 @@ pub struct FormatProjection {
     /// What the author wrote before and after each comment in JSX text, which the projection
     /// wrote in marked braces.
     pub(super) text_comments: Vec<[Gap; 2]>,
+    /// How many `>` in JSX text the projection wrote as [`Self::gt_stand_in`].
+    pub(super) text_gts: usize,
+    /// The private-use character written for each `>` in JSX text, which the source never holds.
+    pub(super) gt_stand_in: char,
     pub(super) parser_code_blocks: Vec<ParserCodeBlock>,
     pub(super) parser_shorthand_attributes: Vec<ParserShorthandAttribute>,
     pub(super) shape_fingerprint: u128,
@@ -126,6 +130,7 @@ impl FormatProjection {
             + self.styles.len()
             + self.scripts.len()
             + self.text_comments.len()
+            + self.text_gts
             + self.parser_code_blocks.len()
             + self.parser_shorthand_attributes.len()
     }
@@ -210,6 +215,8 @@ pub fn project_for_format(
                 ]
             })
             .collect(),
+        text_gts: overlay.jsx_text_gts.len(),
+        gt_stand_in: built.gt_stand_in,
         parser_code_blocks: overlay.parser_code_blocks.clone(),
         parser_shorthand_attributes: overlay.parser_shorthand_attributes.clone(),
         shape_fingerprint: structural_fingerprint(overlay),

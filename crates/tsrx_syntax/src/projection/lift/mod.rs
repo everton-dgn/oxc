@@ -19,6 +19,19 @@ use tokens::lift_tokens;
 
 const MISSING_POSITION: usize = usize::MAX;
 
+/// Writes each `>` in JSX text back. `@tsrx/core` reads one there as text, where TSX rejects it,
+/// so the projection wrote a private-use character the source never holds in its place, and Oxfmt
+/// kept it as a word of the text. Oxfmt neither drops nor copies text, so each one comes back once.
+fn lift_text_gts(lifted: String, projection: &FormatProjection) -> Result<String, ProjectionError> {
+    if projection.text_gts == 0 {
+        return Ok(lifted);
+    }
+    if lifted.matches(projection.gt_stand_in).count() != projection.text_gts {
+        return Err(ProjectionError::MarkerResidual);
+    }
+    Ok(lifted.replace(projection.gt_stand_in, ">"))
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct ScaffoldSpan {
     start: usize,
@@ -61,6 +74,7 @@ pub fn lift_formatted(
     } else {
         lift_text_comments(&lifted, projection)?
     };
+    let lifted = lift_text_gts(lifted, projection)?;
     let lifted = lift_tokens(&lifted, projection)?;
     if lifted.contains(&projection.prefix) {
         return Err(ProjectionError::MarkerResidual);

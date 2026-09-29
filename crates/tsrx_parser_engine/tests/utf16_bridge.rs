@@ -1166,3 +1166,22 @@ fn multiple_output_diagnostics_use_original_utf16_units() {
     assert_eq!((labels[0].span.start, labels[0].span.end), (35, 40));
     assert_no_private_markers_in_diagnostics(&result.errors);
 }
+
+#[test]
+fn a_gt_in_jsx_text_keeps_lone_surrogates_and_astral_text_beside_it() {
+    // tsrx-org/oxc#145: the projection writes a stand-in for each `>` in JSX text, and the parser
+    // puts the `>` back into `value` and `raw`, where the UTF-16 repair then restores a lone
+    // surrogate in the same text.
+    let template = "function View() @{ <p>😀> x<U>>é</p> }";
+    for (unit, escape) in [(HIGH, "d800"), (LOW, "dc00")] {
+        let source = substitute_unit(template, unit);
+        let result = parse_units(&source);
+        assert_eq!(result.status, ParseCompleteness::Complete);
+        assert_eq!(result.coordinate_domain, CoordinateDomain::OriginalUtf16Units);
+        let tape = result.program();
+        let text = object_at(tape, "JSXText", (22, 30));
+        let expected = format!(r#""😀> x\u{escape}>é""#);
+        assert_eq!(scalar_field(tape, text, "value"), expected);
+        assert_eq!(scalar_field(tape, text, "raw"), expected);
+    }
+}

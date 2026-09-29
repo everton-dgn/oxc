@@ -15,8 +15,9 @@ pub use model::{
     ByteSpan, ClauseRole, ControlContext, ControlKind, EmbeddedKind, ForHeader, ImplicitClose,
     NONE_INDEX, Overlay, OverlayClause, OverlayDynamicTag, OverlayEmbedded, OverlayNode,
     OverlayStyleBlock, OverlayToken, OverlayView, PARSER_EXPRESSION_CODE_BLOCK_PREFIX,
-    ParserCodeBlock, ParserCodeBlockKind, ParserDynamicKind, ParserDynamicToken,
-    ParserShorthandAttribute, ScriptBlock, StructuralKind, StructuralToken, unclosed_tag_message,
+    PARSER_JSX_TEXT_GT_STAND_IN, ParserCodeBlock, ParserCodeBlockKind, ParserDynamicKind,
+    ParserDynamicToken, ParserShorthandAttribute, ScriptBlock, StructuralKind, StructuralToken,
+    unclosed_tag_message,
 };
 pub use parser_projection::{
     MappedProjection as ParserProjection, SyntheticAnchor, project_for_parser,

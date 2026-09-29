@@ -188,13 +188,23 @@ fn build_allowed_gaps(
         validate_style_source(source, source_len, *style)?;
     }
 
+    // The parser projection writes a stand-in for each `>` in JSX text, which TSX rejects.
+    let mut text_gt_gaps = Vec::with_capacity(overlay.jsx_text_gts.len());
+    for &gt in overlay.jsx_text_gts {
+        if source.as_bytes().get(gt as usize) != Some(&b'>') {
+            return Err(TsrxParseError::Unsupported("JSX text `>` gap is not a `>`"));
+        }
+        text_gt_gaps.push(ByteSpan::new(gt, gt + 1));
+    }
+
     let streams = [
         token_gaps.as_slice(),
         header_gaps.as_slice(),
         dynamic_gaps.as_slice(),
         embedded_gaps.as_slice(),
+        text_gt_gaps.as_slice(),
     ];
-    let mut cursors = [0_usize; 4];
+    let mut cursors = [0_usize; 5];
     let total = streams.iter().map(|stream| stream.len()).sum();
     let mut merged = Vec::with_capacity(total);
     loop {

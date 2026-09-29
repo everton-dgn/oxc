@@ -444,19 +444,9 @@ impl Scanner<'_> {
                     index = self.scan_parser_code_block(index, ParserCodeBlockKind::JsxChild)?;
                     run_start = index;
                 }
+                // A branch keyword no control owns here, `@else` or `@catch` in `<code>@else</code>`
+                // or `me@else.com`, is text to `@tsrx/core`, as any other `@` in JSX text is.
                 b'@' => {
-                    if self.keyword_at(index, b"else")
-                        || self.keyword_at(index, b"empty")
-                        || self.keyword_at(index, b"case")
-                        || self.keyword_at(index, b"default")
-                        || self.keyword_at(index, b"pending")
-                        || self.keyword_at(index, b"catch")
-                    {
-                        return Err(ProjectionError::MalformedSyntax {
-                            offset: to_u32(index)?,
-                            expected: "an owning TSRX control",
-                        });
-                    }
                     if jsx_text_looks_structural(self.bytes, index)
                         && let Some(construct) = unsupported_at_construct(self.bytes, index)
                     {
@@ -496,6 +486,11 @@ impl Scanner<'_> {
                     self.implicit_closes
                         .push(ImplicitClose { offset: to_u32(index)?, name: display_name });
                     return Ok(index);
+                }
+                // `@tsrx/core` reads a `>` in JSX text as text, where TSX rejects it.
+                b'>' => {
+                    self.jsx_text_gts.push(to_u32(index)?);
+                    index += 1;
                 }
                 _ => {
                     self.mark_surrogates(index, index + 1, OpaqueSurrogateContext::JsxText);

@@ -145,6 +145,14 @@ pub enum ParserCodeBlockKind {
     Expression,
 }
 
+/// What the parser projection writes for a `>` in JSX text.
+///
+/// TSX rejects a `>` there and `@tsrx/core` reads it as text. The stand-in is one byte, so the
+/// text keeps its length, TSX reads it as text, and it can never join the text around it into a
+/// projection marker. The parser puts the `>` back into the text's `value` and `raw` from the
+/// authored source.
+pub const PARSER_JSX_TEXT_GT_STAND_IN: &str = "-";
+
 /// Generated expression prefix shared by projection and module-result reconstruction.
 pub const PARSER_EXPRESSION_CODE_BLOCK_PREFIX: &str = "void async function*()";
 
@@ -308,6 +316,8 @@ pub struct OverlayView<'a> {
     pub script_blocks: &'a [ScriptBlock],
     /// JavaScript comments in JSX text, in source order. They are comments, not text.
     pub jsx_text_comments: &'a [ByteSpan],
+    /// Offsets of each `>` in JSX text, in source order. They are text.
+    pub jsx_text_gts: &'a [u32],
     /// Elements a `}` closed before their closing tag, innermost first at each offset.
     pub implicit_closes: &'a [ImplicitClose],
     pub first_root: u32,
@@ -338,6 +348,10 @@ pub struct Overlay {
     /// the line break; `/* ... */` anywhere), in source order. Every projection writes each one
     /// in braces, the `{/* ... */}` child TSX reads as a comment.
     pub(crate) jsx_text_comments: Vec<ByteSpan>,
+    /// Offsets of each `>` in JSX text, in source order. `@tsrx/core` reads a `>` there as text,
+    /// where TSX rejects it, so every projection writes a stand-in for each one that TSX reads as
+    /// text, and each lane puts the `>` back.
+    pub(crate) jsx_text_gts: Vec<u32>,
     pub(crate) implicit_closes: Vec<ImplicitClose>,
     pub(crate) first_root: u32,
     pub(crate) last_root: u32,
@@ -365,6 +379,7 @@ impl Overlay {
             style_blocks: &self.style_blocks,
             script_blocks: &self.script_blocks,
             jsx_text_comments: &self.jsx_text_comments,
+            jsx_text_gts: &self.jsx_text_gts,
             implicit_closes: &self.implicit_closes,
             first_root: self.first_root,
         }
@@ -374,6 +389,12 @@ impl Overlay {
     #[must_use]
     pub fn jsx_text_comments(&self) -> &[ByteSpan] {
         &self.jsx_text_comments
+    }
+
+    /// Offsets of each `>` in JSX text, in source order.
+    #[must_use]
+    pub fn jsx_text_gts(&self) -> &[u32] {
+        &self.jsx_text_gts
     }
 
     /// Elements a `}` closed before their closing tag.

@@ -49,6 +49,7 @@ pub(super) fn structural_fingerprint(overlay: &Overlay) -> u128 {
         mix(flags);
     }
     mix(overlay.style_blocks.len() as u64);
+    mix(overlay.jsx_text_gts.len() as u64);
     (u128::from(first) << 64) | u128::from(second)
 }
 

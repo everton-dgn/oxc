@@ -951,6 +951,62 @@ mod tests {
     }
 
     #[test]
+    fn a_gt_and_an_unowned_branch_keyword_in_jsx_text_format_as_text() {
+        // tsrx-org/oxc#145 and #146: `@tsrx/core` reads a `>` in JSX text, and an `@else` no
+        // control owns, as text. The projection writes a private-use stand-in for each `>` that
+        // Oxfmt keeps as a word of the text, even where it wraps the line before one, and the
+        // lift writes the `>` back. A private-use character the author wrote is left alone.
+        let source = concat!(
+            "export function App() @{\n",
+            "\t<div>\n",
+            "\t\t<p>a > b</p>\n",
+            "\t\t<p>></p>\n",
+            "\t\t<code>@else</code> <code>@empty</code> me@catch.com\n",
+            "\t\t@if (x) {\n",
+            "\t\t\t<p>c > d</p>\n",
+            "\t\t} @else {\n",
+            "\t\t\t<p>@pending > none</p>\n",
+            "\t\t}\n",
+            "\t\t<p>a very long line of text with many words that will surely need to wrap > past the print width > limit</p>\n",
+            "\t</div>\n",
+            "}\n",
+            "\n",
+            "export function Plain() {\n",
+            "\treturn <p>\u{e000} a > b</p>;\n",
+            "}\n",
+        );
+        let first = format_text(Path::new("App.tsrx"), source).unwrap();
+        assert_eq!(
+            first.code,
+            concat!(
+                "export function App() @{\n",
+                "  <div>\n",
+                "    <p>a > b</p>\n",
+                "    <p>></p>\n",
+                "    <code>@else</code> <code>@empty</code> me@catch.com\n",
+                "    @if (x) {\n",
+                "      <p>c > d</p>;\n",
+                "    } @else {\n",
+                "      <p>@pending > none</p>;\n",
+                "    }\n",
+                "    <p>\n",
+                "      a very long line of text with many words that will surely need to wrap > past the print width\n",
+                "      > limit\n",
+                "    </p>\n",
+                "  </div>;\n",
+                "}\n",
+                "\n",
+                "export function Plain() {\n",
+                "  return <p>\u{e000} a > b</p>;\n",
+                "}\n",
+            )
+        );
+        let second = format_text(Path::new("App.tsrx"), &first.code).unwrap();
+        assert_eq!(second.code, first.code);
+        assert!(!second.changed);
+    }
+
+    #[test]
     fn sort_imports_orders_a_tsrx_import_chunk_and_converges() {
         let source = concat!(
             "import { z } from \"zebra\";\n",
