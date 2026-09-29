@@ -54,6 +54,14 @@ fn a_malformed_shorthand_fails_where_core_reports_it() {
         ("const v = <a {\"s\"} />;", 14, "a shorthand attribute's name or a spread `...`"),
         ("const v = <a {enum} />;", 14, "a shorthand attribute's name or a spread `...`"),
         ("const v = <a {type} />;", 14, "a shorthand attribute's name or a spread `...`"),
+        // Bugbot on tsrx-org/oxc#158: escapes are decoded before a name is refused, and a bad
+        // escape fails where `@tsrx/core` fails it.
+        ("const v = <a {t\\u0079pe} />;", 14, "a shorthand attribute's name or a spread `...`"),
+        ("const v = <a {\\u0031a} />;", 14, "a Unicode escape that spells an identifier character"),
+        ("const v = <a {\\x61} />;", 15, "`u` after `\\` in an identifier name"),
+        ("const v = <a {ab\\u00} />;", 18, "hexadecimal digits in a Unicode escape"),
+        ("const v = <a {\\u{zz}} />;", 17, "hexadecimal digits in a Unicode escape"),
+        ("const v = <a {ab\\u{110000}} />;", 19, "a Unicode escape no greater than 0x10FFFF"),
     ] {
         assert_eq!(
             scan_for_parser(source).unwrap_err(),

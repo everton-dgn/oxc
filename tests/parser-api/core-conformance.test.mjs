@@ -1348,3 +1348,37 @@ test("#148: a malformed shorthand attribute fails with core's code at core's pos
     }
   }
 });
+
+test("#148: a shorthand name with escapes is read, and a bad or keyword escape fails, as in core", () => {
+  // Bugbot on tsrx-org/oxc#158: escapes are decoded before `enum`, `interface`, and `type` are
+  // refused, an escaped keyword fails at the name, and a bad escape fails where acorn fails it.
+  for (const filename of everyJsxFile) {
+    assert.deepEqual(
+      shorthandAttributes(parseModule("const v = <a {\\u0061} {\\u{62}c} {a\\u0031} {\\u00e9} />;", filename)),
+      [
+        [13, 21, "a", 14, 20, true, "JSXExpressionContainer", 13, 21, "Identifier", "a", 14, 20],
+        [22, 31, "bc", 23, 30, true, "JSXExpressionContainer", 22, 31, "Identifier", "bc", 23, 30],
+        [32, 41, "a1", 33, 40, true, "JSXExpressionContainer", 32, 41, "Identifier", "a1", 33, 40],
+        [42, 50, "é", 43, 49, true, "JSXExpressionContainer", 42, 50, "Identifier", "é", 43, 49],
+      ],
+      filename,
+    );
+    for (const [source, code, pos] of [
+      ["const v = <a {t\\u0079pe} />;", "TS1012", 14],
+      ["const v = <a {\\u0065num} />;", "TS1012", 14],
+      ["const v = <a {\\u0063lass} />;", "TS1260", 14],
+      ["const v = <a {\\u0031a} />;", "TS1127", 14],
+      ["const v = <a {a\\u{0}} />;", "TS1127", 15],
+      ["const v = <a {\\x61} />;", "TS1127", 15],
+      ["const v = <a {ab\\u00} />;", "TS1125", 18],
+      ["const v = <a {\\u{zz}} />;", "TS1125", 17],
+      ["const v = <a {ab\\u{110000}} />;", "TS1198", 19],
+    ]) {
+      assert.throws(
+        () => parseModule(source, filename),
+        (error) => error.code === code && error.pos === pos,
+        `${source} in ${filename}`,
+      );
+    }
+  }
+});

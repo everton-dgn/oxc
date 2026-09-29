@@ -19,6 +19,26 @@ use super::surrogates::OpaqueSurrogateContext;
 const SHORTHAND_ATTRIBUTE_NAME: &str = "a shorthand attribute's name or a spread `...`";
 /// What a shorthand attribute's name is missing when anything but `}` follows it.
 const SHORTHAND_ATTRIBUTE_CLOSE: &str = "`}` after a shorthand attribute's name";
+/// What a `\u` escape in a shorthand attribute's name has to spell (`@tsrx/core`'s TS1127).
+const IDENTIFIER_ESCAPE: &str = "a Unicode escape that spells an identifier character";
+/// What follows a `\` in an identifier name (TS1127).
+const IDENTIFIER_ESCAPE_U: &str = "`u` after `\\` in an identifier name";
+/// What a `\u` escape holds (TS1125).
+const IDENTIFIER_ESCAPE_HEX: &str = "hexadecimal digits in a Unicode escape";
+/// The range an escaped code point lies in (TS1198).
+const IDENTIFIER_ESCAPE_BOUNDS: &str = "a Unicode escape no greater than 0x10FFFF";
+
+/// Whether an escaped character can start an identifier (`first`) or continue one.
+fn escaped_identifier_character(character: char, first: bool) -> bool {
+    if character.is_ascii() {
+        let byte = character as u8;
+        return byte.is_ascii_alphabetic()
+            || matches!(byte, b'_' | b'$')
+            || (!first && byte.is_ascii_digit());
+    }
+    character.is_alphabetic()
+        || (!first && (character.is_alphanumeric() || matches!(character, '\u{200c}' | '\u{200d}')))
+}
 
 impl Scanner<'_> {
     #[expect(
@@ -619,12 +639,14 @@ impl Scanner<'_> {
     /// up to its `}`. Returns the name's span and the offset after the `}`.
     ///
     /// `@tsrx/core` takes any identifier name, a reserved word or one with `\u` escapes included,
-    /// except `enum`, `interface`, and `type`. Anything else is its `Unexpected token` (TS1012)
-    /// at the name, and a name followed by anything but trivia and `}` is its `'}' expected`
-    /// (TS1005) where the `}` should be.
+    /// except `enum`, `interface`, and `type`, escaped or not. Anything else is its `Unexpected
+    /// token` (TS1012) at the name, an escape that is no identifier character its `Invalid Unicode
+    /// escape` (TS1127), and a name followed by anything but trivia and `}` its `'}' expected`
+    /// (TS1005) where the `}` should be. An escaped keyword, `{\u0063lass}`, goes to OXC as written,
+    /// which rejects it at the name as core does.
     fn shorthand_attribute_name(&self, start: usize) -> Result<(ByteSpan, usize), ProjectionError> {
-        let end = self.skip_identifier_name(start);
-        if end == start || matches!(&self.bytes[start..end], b"enum" | b"interface" | b"type") {
+        let (end, name) = self.read_identifier_name(start)?;
+        if end == start || matches!(name.as_str(), "enum" | "interface" | "type") {
             return Err(ProjectionError::MalformedSyntax {
                 offset: to_u32(start)?,
                 expected: SHORTHAND_ATTRIBUTE_NAME,
@@ -640,43 +662,70 @@ impl Scanner<'_> {
         Ok((ByteSpan::new(to_u32(start)?, to_u32(end)?), close + 1))
     }
 
-    /// Skips an identifier name, with any `\u` escapes in it, and returns where it ends.
-    fn skip_identifier_name(&self, start: usize) -> usize {
+    /// Reads an identifier name at `start`, decoding any `\u` escapes in it. Returns where it ends
+    /// and the name it spells, or fails at an escape that spells no identifier character there.
+    fn read_identifier_name(&self, start: usize) -> Result<(usize, String), ProjectionError> {
         let mut index = start;
+        let mut name = String::new();
         loop {
-            let width = if index == start {
+            let first = index == start;
+            let width = if first {
                 self.identifier_start_width(index)
             } else {
                 self.identifier_continue_width(index)
             };
             if let Some(width) = width {
+                let offset = to_u32(index)?;
+                name.push_str(
+                    std::str::from_utf8(&self.bytes[index..index + width])
+                        .map_err(|_| ProjectionError::SourceChanged { offset })?,
+                );
                 index += width;
                 continue;
             }
-            if self.bytes.get(index..index + 2) != Some(b"\\u") {
-                return index;
+            if self.bytes.get(index) != Some(&b'\\') {
+                return Ok((index, name));
+            }
+            let malformed = |offset: usize, expected: &'static str| {
+                to_u32(offset).map(|offset| ProjectionError::MalformedSyntax { offset, expected })
+            };
+            if self.bytes.get(index + 1) != Some(&b'u') {
+                return Err(malformed(index + 1, IDENTIFIER_ESCAPE_U)?);
             }
             let digits = index + 2;
-            let end = if self.bytes.get(digits) == Some(&b'{') {
-                let close = self.bytes[digits + 1..]
+            let (value, end) = if self.bytes.get(digits) == Some(&b'{') {
+                let hex_start = digits + 1;
+                let length = self.bytes[hex_start..]
                     .iter()
                     .position(|byte| !byte.is_ascii_hexdigit())
-                    .map(|length| digits + 1 + length);
-                match close {
-                    Some(close) if close > digits + 1 && self.bytes.get(close) == Some(&b'}') => {
-                        close + 1
-                    }
-                    _ => return index,
+                    .unwrap_or(self.bytes.len() - hex_start);
+                if length == 0 || self.bytes.get(hex_start + length) != Some(&b'}') {
+                    return Err(malformed(hex_start, IDENTIFIER_ESCAPE_HEX)?);
                 }
-            } else if self
-                .bytes
-                .get(digits..digits + 4)
-                .is_some_and(|hex| hex.iter().all(u8::is_ascii_hexdigit))
-            {
-                digits + 4
+                let value = std::str::from_utf8(&self.bytes[hex_start..hex_start + length])
+                    .ok()
+                    .and_then(|hex| u32::from_str_radix(hex, 16).ok())
+                    .filter(|value| *value <= 0x0010_FFFF);
+                let Some(value) = value else {
+                    return Err(malformed(hex_start, IDENTIFIER_ESCAPE_BOUNDS)?);
+                };
+                (value, hex_start + length + 1)
             } else {
-                return index;
+                let value = self
+                    .bytes
+                    .get(digits..digits + 4)
+                    .filter(|hex| hex.iter().all(u8::is_ascii_hexdigit))
+                    .and_then(|hex| std::str::from_utf8(hex).ok())
+                    .and_then(|hex| u32::from_str_radix(hex, 16).ok());
+                let Some(value) = value else {
+                    return Err(malformed(digits, IDENTIFIER_ESCAPE_HEX)?);
+                };
+                (value, digits + 4)
             };
+            let character = char::from_u32(value)
+                .filter(|character| escaped_identifier_character(*character, first))
+                .ok_or(malformed(index, IDENTIFIER_ESCAPE)?)?;
+            name.push(character);
             index = end;
         }
     }
