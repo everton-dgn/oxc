@@ -83,10 +83,20 @@ test("loose recovery flattens adjacent authored render roots into the reference 
   assert.deepEqual(block.body.map((node) => node.type), ["JSXElement", "JSXElement"]);
   assert.equal(block.render.type, "JSXElement");
   assert.equal(block.render.openingElement.name.name, "button");
-  assert.deepEqual(errors, []);
+  // @tsrx/core 0.5 reports each extra render root as TSRX2011, at `<img/>` and `<button/>`.
+  assert.deepEqual(
+    errors.map((error) => ({ code: error.code, pos: error.pos, type: error.type })),
+    [
+      { code: "TSRX2011", pos: source.indexOf("<img/>"), type: "usage" },
+      { code: "TSRX2011", pos: source.indexOf("<button/>"), type: "usage" },
+    ],
+  );
 });
 
-test("loose recovery keeps a run of incomplete constructs usable without changing strict parsing", () => {
+// @tsrx/core 0.5.2 throws for this source in loose mode as well as strict mode. The parser
+// reports these incomplete constructs as authored diagnostics now, so the facade's recovery for
+// the parser's old no-diagnostic failure does not apply, and loose parsing throws as core does.
+test("loose parsing throws on a run of incomplete constructs, as strict parsing and @tsrx/core do", () => {
   const source = `export function App({ value, values }) @{
 	@
 	@if (value) { <span>{value}</span> } @
@@ -96,15 +106,22 @@ test("loose recovery keeps a run of incomplete constructs usable without changin
 	const expression = value + @;
 }
 @`;
-  const program = api.parseModule(source, "constructs.tsrx", { loose: true, errors: [] });
-  const block = exportedFunction(program).body;
-
-  assert.deepEqual(block.body.map((node) => node.type), [
-    "JSXIfExpression",
-    "JSXForExpression",
-    "JSXSwitchExpression",
-  ]);
-  assert.equal(block.render.type, "JSXTryExpression");
+  let strict;
+  assert.throws(
+    () => api.parseModule(source, "constructs.tsrx"),
+    (error) => {
+      strict = error;
+      return error instanceof SyntaxError && error.type === "fatal";
+    },
+  );
+  assert.throws(
+    () => api.parseModule(source, "constructs.tsrx", { loose: true, errors: [] }),
+    (error) =>
+      error instanceof SyntaxError &&
+      error.type === "fatal" &&
+      error.code === strict.code &&
+      error.pos === strict.pos,
+  );
 });
 
 test("loose recovery restores an incomplete JSX element for native closing-tag requests", () => {
