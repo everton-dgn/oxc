@@ -6,7 +6,8 @@ import { parseModule } from "../../packages/tsrx-core-compat/dist/index.js";
 // Regression tests for the @tsrx/core 0.5.0 conformance issues tsrx-org/oxc #110, #112, #113,
 // #114, #115, #116, #117, #118, #125, #127, and #128. Every expected value below is what @tsrx/core 0.5.0 (tsrx main at
 // f78fada) returns for the same source, so a difference here is a difference from the reference
-// parser. The #111, #145, #146, #147, #148, and #149 tests at the end take theirs from @tsrx/core 0.5.2.
+// parser. The #111, #145, #146, #147, #148, #149, #152, and #153 tests at the end take theirs
+// from @tsrx/core 0.5.2.
 
 function findAll(root, predicate) {
   const found = [];
@@ -1581,4 +1582,107 @@ test("#149: a member access, call, or `!` after a control-flow expression fails 
   // `!=` is an operator, and a parenthesized control takes a subscript.
   assert.doesNotThrow(() => parseModule("const x = @if (a) {\n\t<p />\n} != 1;", "App.tsrx"));
   assert.doesNotThrow(() => parseModule("const x = (@if (a) {\n\t<p />\n}).length;", "App.tsrx"));
+// Each opening element in source order as `[name, start, end, typeArguments]`, the type
+// arguments as `[start, end, param types]`, or null for an element without them.
+const openingTypeArguments = (ast) =>
+  findAll(ast, (node) => node.type === "JSXOpeningElement")
+    .sort((left, right) => left.start - right.start)
+    .map(({ name, start, end, typeArguments }) => [
+      name.name ?? `${name.object.name}.${name.property.name}`,
+      start,
+      end,
+      typeArguments ? [typeArguments.start, typeArguments.end, typeArguments.params.map(({ type }) => type)] : null,
+    ]);
+
+test("#153: type arguments on a JSX element are its opening element's typeArguments", () => {
+  const cases = {
+    "in another element": [
+      "const view = <main><List<string> /></main>;",
+      [["main", 13, 19, null], ["List", 19, 35, [24, 32, ["TSStringKeyword"]]]],
+    ],
+    "with children": [
+      "const view = <List<string>>a</List>;",
+      [["List", 13, 27, [18, 26, ["TSStringKeyword"]]]],
+    ],
+    "self-closing, with an attribute": [
+      "const view = <List<string> items={items} />;",
+      [["List", 13, 43, [18, 26, ["TSStringKeyword"]]]],
+    ],
+    "on a member name": [
+      "const view = <main><UI.List<string> /></main>;",
+      [["main", 13, 19, null], ["UI.List", 19, 38, [27, 35, ["TSStringKeyword"]]]],
+    ],
+  };
+  for (const [name, [source, expected]] of Object.entries(cases)) {
+    for (const filename of ["App.tsrx", "App.tsx"]) {
+      assert.deepEqual(openingTypeArguments(parseModule(source, filename)), expected, `${name} in ${filename}`);
+    }
+  }
+  assert.deepEqual(
+    openingTypeArguments(
+      parseModule("export function App() @{\n\t<main>\n\t\t<List<string> items={items} />\n\t</main>\n}", "App.tsrx"),
+    ),
+    [["main", 26, 32, null], ["List", 35, 65, [40, 48, ["TSStringKeyword"]]]],
+  );
+});
+
+test("#153: type arguments TypeScript accepts on an element parse, though core 0.5.2 rejects some", () => {
+  // Core fails the first three with `Unexpected token`; TSX and OXC read them.
+  for (const source of [
+    "const v = <List<Map<string, Array<number>>>>x</List>;",
+    "const v = <List<() => void> />;",
+    "const v = <main><Pair<string, number> a={1} /></main>;",
+    "export function App() @{\n\t<List<string>>{item}</List>\n}",
+  ]) {
+    assert.ok(openingTypeArguments(parseModule(source, "App.tsrx")).some(([, , , typeArguments]) => typeArguments), source);
+  }
+  assert.throws(() => parseModule("const v = <main><List<string /></main>;", "App.tsrx"));
+});
+
+// Each type parameter list as `[start, end, [name, start, end]...]`.
+const typeParameterLists = (ast) =>
+  findAll(ast, (node) => node.type === "TSTypeParameterDeclaration").map(({ start, end, params }) => [
+    start,
+    end,
+    params.map(({ name, start, end }) => [name.name, start, end]),
+  ]);
+
+test("#152: a call signature's, construct signature's, or function type's type parameters are types", () => {
+  const cases = {
+    "call signature, then a defaulted type parameter": [
+      "interface Trigger {\n\t<P>(props: P): void;\n}\n\ntype Props<P = unknown> = P;",
+      [[21, 24, [["P", 22, 23]]], [55, 68, [["P", 56, 67]]]],
+      [["TSCallSignatureDeclaration", 21, 41]],
+    ],
+    "function type": [
+      "type Render = <P>(props: P) => void;",
+      [[14, 17, [["P", 15, 16]]]],
+      [["TSFunctionType", 14, 35]],
+    ],
+    "construct signature": [
+      "interface Trigger {\n\tnew <P>(props: P): Trigger;\n}",
+      [[25, 28, [["P", 26, 27]]]],
+      [["TSConstructSignatureDeclaration", 21, 48]],
+    ],
+    "annotation with two type parameters": [
+      "let render: <A, B>(a: A, b: B) => void;",
+      [[12, 18, [["A", 13, 14], ["B", 16, 17]]]],
+      [["TSFunctionType", 12, 38]],
+    ],
+  };
+  for (const [name, [source, lists, signatures]] of Object.entries(cases)) {
+    const ast = parseModule(source, "App.tsrx");
+    assert.deepEqual(typeParameterLists(ast), lists, name);
+    assert.deepEqual(
+      findAll(ast, (node) => /Signature|FunctionType/.test(node.type ?? "")).map(({ type, start, end }) => [type, start, end]),
+      signatures,
+      name,
+    );
+  }
+});
+
+test("#152: markup that only looks like a signature is still markup, and an unclosed one still fails", () => {
+  const ast = parseModule("export function A() @{\n\t<b>(note): y</b>\n}", "App.tsrx");
+  assert.deepEqual(texts(ast).map(({ value }) => value), ["(note): y"]);
+  assert.throws(() => parseModule("const x = <P>(p: P): void;", "App.tsrx"));
 });

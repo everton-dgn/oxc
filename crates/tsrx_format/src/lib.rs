@@ -1053,6 +1053,47 @@ mod tests {
     }
 
     #[test]
+    fn type_arguments_and_signature_type_parameters_format_and_converge() {
+        // tsrx-org/oxc#153: type arguments on an element, and #152: a call signature's and a
+        // function type's type parameters, which a byte scanner could read as markup.
+        let source = concat!(
+            "interface Trigger {\n",
+            "\t<P>(props: P): void;\n",
+            "\tnew <P>(props: P): Trigger;\n",
+            "}\n",
+            "type Props<P = unknown> = P;\n",
+            "type Render = <P>(props: P) => void;\n",
+            "export function App() @{\n",
+            "\t<main>\n",
+            "\t\t<List<string> items={items} />\n",
+            "\t\t<List<string>>{'a'}</List>\n",
+            "\t</main>\n",
+            "}\n",
+        );
+        let first = format_text(Path::new("App.tsrx"), source).unwrap();
+        assert_eq!(
+            first.code,
+            concat!(
+                "interface Trigger {\n",
+                "  <P>(props: P): void;\n",
+                "  new <P>(props: P): Trigger;\n",
+                "}\n",
+                "type Props<P = unknown> = P;\n",
+                "type Render = <P>(props: P) => void;\n",
+                "export function App() @{\n",
+                "  <main>\n",
+                "    <List<string> items={items} />\n",
+                "    <List<string>>{\"a\"}</List>\n",
+                "  </main>;\n",
+                "}\n",
+            )
+        );
+        let second = format_text(Path::new("App.tsrx"), &first.code).unwrap();
+        assert_eq!(second.code, first.code);
+        assert!(!second.changed);
+    }
+
+    #[test]
     fn sort_imports_orders_a_tsrx_import_chunk_and_converges() {
         let source = concat!(
             "import { z } from \"zebra\";\n",
