@@ -400,16 +400,32 @@ function decoratorBefore(source, offset) {
 	else if (source[cursor] === "{" && depth-- === 0) return !isClassBody(source, cursor);
 	return true;
 }
+function blankCommentsAndStrings(text) {
+	let blanked = "";
+	let from = 0;
+	for (let index = 0; index < text.length; index += 1) {
+		const character = text[index];
+		let end = -1;
+		if (character === "\"" || character === "'") end = skipQuoted(text, index, character);
+		else if (character === "`") end = skipTemplateLiteral(text, index);
+		else if (character === "/" && (text[index + 1] === "/" || text[index + 1] === "*")) end = skipComment(text, index);
+		if (end === -1) continue;
+		blanked += text.slice(from, index) + " ".repeat(end - index);
+		from = end;
+		index = end - 1;
+	}
+	return blanked + text.slice(from);
+}
 function isClassBody(source, open) {
-	const head = source.slice(0, open);
-	const keyword = [...head.matchAll(/(?<![\w$.\-"'`=])class(?=[\s{])/gu)].at(-1);
+	const head = blankCommentsAndStrings(source.slice(0, open));
+	const keyword = [...head.matchAll(/(?<![\w$.\-=])class(?=[\s{])/gu)].at(-1);
 	if (keyword === void 0) return false;
 	const start = keyword.index + 5;
 	if (!CLASS_HEAD.test(head.slice(start))) return false;
 	let parens = 0;
 	let angles = 0;
 	for (let index = start; index < open; index += 1) {
-		const character = source[index];
+		const character = head[index];
 		if (character === "(" || character === "[") parens += 1;
 		else if (character === ")" || character === "]") parens -= 1;
 		else if (parens === 0 && character === "<") angles += 1;

@@ -595,11 +595,31 @@ function decoratorBefore(source, offset) {
   return true;
 }
 
+// `text` with each comment and string literal, quotes included, blanked to spaces.
+function blankCommentsAndStrings(text) {
+  let blanked = "";
+  let from = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+    let end = -1;
+    if (character === '"' || character === "'") end = skipQuoted(text, index, character);
+    else if (character === "`") end = skipTemplateLiteral(text, index);
+    else if (character === "/" && (text[index + 1] === "/" || text[index + 1] === "*")) {
+      end = skipComment(text, index);
+    }
+    if (end === -1) continue;
+    blanked += text.slice(from, index) + " ".repeat(end - index);
+    from = end;
+    index = end - 1;
+  }
+  return blanked + text.slice(from);
+}
+
 // Whether the `{` at `open` opens a class body: the last `class` keyword before it, followed by a
 // class head (a name, type parameters, and heritage) whose first `{` outside brackets is `open`.
 function isClassBody(source, open) {
-  const head = source.slice(0, open);
-  const keyword = [...head.matchAll(/(?<![\w$.\-"'`=])class(?=[\s{])/gu)].at(-1);
+  const head = blankCommentsAndStrings(source.slice(0, open));
+  const keyword = [...head.matchAll(/(?<![\w$.\-=])class(?=[\s{])/gu)].at(-1);
   if (keyword === undefined) return false;
   const start = keyword.index + "class".length;
   if (!CLASS_HEAD.test(head.slice(start))) return false;
@@ -607,7 +627,7 @@ function isClassBody(source, open) {
   let parens = 0;
   let angles = 0;
   for (let index = start; index < open; index += 1) {
-    const character = source[index];
+    const character = head[index];
     if (character === "(" || character === "[") parens += 1;
     else if (character === ")" || character === "]") parens -= 1;
     else if (parens === 0 && character === "<") angles += 1;

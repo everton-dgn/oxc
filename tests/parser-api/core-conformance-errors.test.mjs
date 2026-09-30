@@ -148,6 +148,9 @@ test("#142: a shorthand attribute with no `}` is TS1005, and a decorator in a cl
     "class A extends B<{ x: 1 }> { @dec }",
     "class A implements I<{ x: 1 }> { @dec }",
     "class A extends (a > b ? X : Y) { @dec }",
+    "class A /* c */ { @dec }",
+    "class A // c\n{ @dec }",
+    'class A extends B<"a>b"> { @dec }',
   ]) {
     assert.notEqual(thrown(source).code, "TS1206", source);
   }
@@ -157,6 +160,7 @@ test("#142: a shorthand attribute with no `}` is TS1005, and a decorator in a cl
     ["class A {} function f() { @x }", 29],
     ["class A { m() {} } function f() { @x }", 37],
     ['const c = "class"; function f() { @x }', 37],
+    ["class A {} /* class B */ function f() { @x }", 43],
   ]) {
     const error = thrown(source);
     assert.deepEqual(
