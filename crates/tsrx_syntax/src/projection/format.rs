@@ -113,6 +113,8 @@ pub struct FormatProjection {
     pub(super) gt_stand_in: char,
     pub(super) parser_code_blocks: Vec<ParserCodeBlock>,
     pub(super) parser_shorthand_attributes: Vec<ParserShorthandAttribute>,
+    /// Each shorthand attribute's authored name, which the lift writes back for a reserved word.
+    pub(super) shorthand_names: Vec<String>,
     pub(super) shape_fingerprint: u128,
 }
 
@@ -219,6 +221,16 @@ pub fn project_for_format(
         gt_stand_in: built.gt_stand_in,
         parser_code_blocks: overlay.parser_code_blocks.clone(),
         parser_shorthand_attributes: overlay.parser_shorthand_attributes.clone(),
+        shorthand_names: overlay
+            .parser_shorthand_attributes
+            .iter()
+            .map(|attribute| {
+                source
+                    .get(attribute.identifier.start as usize..attribute.identifier.end as usize)
+                    .map(str::to_owned)
+                    .ok_or(ProjectionError::SourceChanged { offset: attribute.identifier.start })
+            })
+            .collect::<Result<_, _>>()?,
         shape_fingerprint: structural_fingerprint(overlay),
     })
 }

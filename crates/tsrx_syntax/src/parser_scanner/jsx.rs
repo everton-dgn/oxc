@@ -13,7 +13,51 @@ use super::Scanner;
 use super::dynamic::contains_collision_scalar;
 use super::lexical::identifier_continue_width;
 use super::lexical::unsupported_at_construct;
+use super::lexical::{is_identifier_continue, is_identifier_start, unicode_identifier_start};
 use super::surrogates::OpaqueSurrogateContext;
+
+/// What a shorthand attribute's `{` is missing when no identifier name follows it.
+const SHORTHAND_ATTRIBUTE_NAME: &str = "a shorthand attribute's name or a spread `...`";
+/// What a shorthand attribute's name is missing when anything but `}` follows it.
+const SHORTHAND_ATTRIBUTE_CLOSE: &str = "`}` after a shorthand attribute's name";
+/// What a `\u` escape in a shorthand attribute's name has to spell (`@tsrx/core`'s TS1127).
+const IDENTIFIER_ESCAPE: &str = "a Unicode escape that spells an identifier character";
+/// What follows a `\` in an identifier name (TS1127).
+const IDENTIFIER_ESCAPE_U: &str = "`u` after `\\` in an identifier name";
+/// What a `\u` escape holds (TS1125).
+const IDENTIFIER_ESCAPE_HEX: &str = "hexadecimal digits in a Unicode escape";
+/// The range an escaped code point lies in (TS1198).
+const IDENTIFIER_ESCAPE_BOUNDS: &str = "a Unicode escape no greater than 0x10FFFF";
+
+/// Whether an escaped character can start an identifier (`first`) or continue one, by the rule
+/// the scanner reads a written one: an ASCII identifier byte, a Unicode identifier start
+/// (`Other_ID_Start` included), or after the start any other scalar but whitespace, control
+/// characters, and the symbol blocks no `ID_Continue` scalar is in, so combining marks continue
+/// a name. OXC, which the name reaches as written, holds a continue scalar to `ID_Continue`
+/// exactly; the refusals here only make core's usual escapes fail where core fails them.
+fn escaped_identifier_character(character: char, first: bool) -> bool {
+    if character.is_ascii() {
+        let byte = character as u8;
+        return is_identifier_start(byte) || (!first && is_identifier_continue(byte));
+    }
+    if unicode_identifier_start(character) {
+        return true;
+    }
+    if first || character.is_whitespace() || character.is_control() {
+        return false;
+    }
+    match u32::from(character) {
+        // General punctuation to miscellaneous symbols and arrows: only these continue a name.
+        0x2000..=0x2BFF => {
+            character.is_alphanumeric()
+                || matches!(u32::from(character), 0x200C | 0x200D | 0x203F | 0x2040 | 0x2054)
+                || (0x20D0..=0x20F0).contains(&u32::from(character))
+        }
+        // Mahjong tiles to symbols and pictographs extended-A: emoji, never a name.
+        0x1_F000..=0x1_FAFF => false,
+        _ => true,
+    }
+}
 
 impl Scanner<'_> {
     #[expect(
@@ -140,18 +184,23 @@ impl Scanner<'_> {
                         index = self.skip_jsx_quote(index, byte)?;
                         expecting_attribute_value = false;
                     }
-                    b'{' => {
-                        let shorthand_start = index;
-                        index = self.scan_expression_region(index + 1, Some(b'}'))?;
-                        if !expecting_attribute_value
-                            && let Some(identifier) =
-                                self.jsx_shorthand_identifier(shorthand_start, index)
-                        {
+                    // In attribute position a `{` opens a spread, `{...props}`, or a shorthand
+                    // attribute, `{name}`, which `@tsrx/core` reads as `name={name}` in every JSX.
+                    b'{' if !expecting_attribute_value => {
+                        let inner = self.skip_trivia(index + 1)?;
+                        if self.bytes.get(inner..inner + 3) == Some(b"...") {
+                            index = self.scan_expression_region(index + 1, Some(b'}'))?;
+                        } else {
+                            let (identifier, end) = self.shorthand_attribute_name(inner)?;
                             self.parser_shorthand_attributes.push(ParserShorthandAttribute {
-                                span: ByteSpan::new(to_u32(shorthand_start)?, to_u32(index)?),
+                                span: ByteSpan::new(to_u32(index)?, to_u32(end)?),
                                 identifier,
                             });
+                            index = end;
                         }
+                    }
+                    b'{' => {
+                        index = self.scan_expression_region(index + 1, Some(b'}'))?;
                         expecting_attribute_value = false;
                     }
                     b'/' if self.bytes.get(index + 1) == Some(&b'*') => {
@@ -605,20 +654,99 @@ impl Scanner<'_> {
         Ok(())
     }
 
-    fn jsx_shorthand_identifier(&self, start: usize, end: usize) -> Option<ByteSpan> {
-        let identifier_start = start.checked_add(1)?;
-        let identifier_end = end.checked_sub(1)?;
-        if self.bytes.get(start) != Some(&b'{')
-            || self.bytes.get(identifier_end) != Some(&b'}')
-            || self.identifier_start_width(identifier_start).is_none()
-            || self.skip_identifier(identifier_start) != identifier_end
-        {
-            return None;
+    /// Reads a shorthand attribute's name at `start`, past the trivia after its `{`, and the trivia
+    /// up to its `}`. Returns the name's span and the offset after the `}`.
+    ///
+    /// `@tsrx/core` takes any identifier name, a reserved word or one with `\u` escapes included,
+    /// except `enum`, `interface`, and `type`, escaped or not. Anything else is its `Unexpected
+    /// token` (TS1012) at the name, an escape that is no identifier character its `Invalid Unicode
+    /// escape` (TS1127), and a name followed by anything but trivia and `}` its `'}' expected`
+    /// (TS1005) where the `}` should be. An escaped keyword, `{\u0063lass}`, goes to OXC as written,
+    /// which rejects it at the name as core does.
+    fn shorthand_attribute_name(&self, start: usize) -> Result<(ByteSpan, usize), ProjectionError> {
+        let (end, name) = self.read_identifier_name(start)?;
+        if end == start || matches!(name.as_str(), "enum" | "interface" | "type") {
+            return Err(ProjectionError::MalformedSyntax {
+                offset: to_u32(start)?,
+                expected: SHORTHAND_ATTRIBUTE_NAME,
+            });
         }
-        Some(ByteSpan::new(
-            u32::try_from(identifier_start).ok()?,
-            u32::try_from(identifier_end).ok()?,
-        ))
+        let close = self.skip_trivia(end)?;
+        if self.bytes.get(close) != Some(&b'}') {
+            return Err(ProjectionError::MalformedSyntax {
+                offset: to_u32(close)?,
+                expected: SHORTHAND_ATTRIBUTE_CLOSE,
+            });
+        }
+        Ok((ByteSpan::new(to_u32(start)?, to_u32(end)?), close + 1))
+    }
+
+    /// Reads an identifier name at `start`, decoding any `\u` escapes in it. Returns where it ends
+    /// and the name it spells, or fails at an escape that spells no identifier character there.
+    fn read_identifier_name(&self, start: usize) -> Result<(usize, String), ProjectionError> {
+        let mut index = start;
+        let mut name = String::new();
+        loop {
+            let first = index == start;
+            let width = if first {
+                self.identifier_start_width(index)
+            } else {
+                self.identifier_continue_width(index)
+            };
+            if let Some(width) = width {
+                let offset = to_u32(index)?;
+                name.push_str(
+                    std::str::from_utf8(&self.bytes[index..index + width])
+                        .map_err(|_| ProjectionError::SourceChanged { offset })?,
+                );
+                index += width;
+                continue;
+            }
+            if self.bytes.get(index) != Some(&b'\\') {
+                return Ok((index, name));
+            }
+            let malformed = |offset: usize, expected: &'static str| {
+                to_u32(offset).map(|offset| ProjectionError::MalformedSyntax { offset, expected })
+            };
+            if self.bytes.get(index + 1) != Some(&b'u') {
+                return Err(malformed(index + 1, IDENTIFIER_ESCAPE_U)?);
+            }
+            let digits = index + 2;
+            let (value, end) = if self.bytes.get(digits) == Some(&b'{') {
+                let hex_start = digits + 1;
+                let length = self.bytes[hex_start..]
+                    .iter()
+                    .position(|byte| !byte.is_ascii_hexdigit())
+                    .unwrap_or(self.bytes.len() - hex_start);
+                if length == 0 || self.bytes.get(hex_start + length) != Some(&b'}') {
+                    return Err(malformed(hex_start, IDENTIFIER_ESCAPE_HEX)?);
+                }
+                let value = std::str::from_utf8(&self.bytes[hex_start..hex_start + length])
+                    .ok()
+                    .and_then(|hex| u32::from_str_radix(hex, 16).ok())
+                    .filter(|value| *value <= 0x0010_FFFF);
+                let Some(value) = value else {
+                    return Err(malformed(hex_start, IDENTIFIER_ESCAPE_BOUNDS)?);
+                };
+                (value, hex_start + length + 1)
+            } else {
+                let value = self
+                    .bytes
+                    .get(digits..digits + 4)
+                    .filter(|hex| hex.iter().all(u8::is_ascii_hexdigit))
+                    .and_then(|hex| std::str::from_utf8(hex).ok())
+                    .and_then(|hex| u32::from_str_radix(hex, 16).ok());
+                let Some(value) = value else {
+                    return Err(malformed(digits, IDENTIFIER_ESCAPE_HEX)?);
+                };
+                (value, digits + 4)
+            };
+            let character = char::from_u32(value)
+                .filter(|character| escaped_identifier_character(*character, first))
+                .ok_or(malformed(index, IDENTIFIER_ESCAPE)?)?;
+            name.push(character);
+            index = end;
+        }
     }
 
     fn skip_jsx_name(&self, mut index: usize) -> usize {

@@ -9,7 +9,8 @@ use crate::{
     model::{
         ByteSpan, ClauseRole, ControlContext, ControlKind, EmbeddedKind, NONE, Overlay,
         PARSER_EXPRESSION_CODE_BLOCK_PREFIX, PARSER_JSX_TEXT_GT_STAND_IN, ParserCodeBlockKind,
-        ParserDynamicKind, StructuralKind,
+        ParserDynamicKind, SHORTHAND_RESERVED_NAME_STAND_IN, StructuralKind,
+        shorthand_name_is_reserved,
     },
     projection_view::ProjectionSegment,
 };
@@ -632,18 +633,35 @@ impl<'a> Builder<'a> {
             .parser_shorthand_attributes
             .get(attribute_index as usize)
             .ok_or(ProjectionError::StructuralMismatch)?;
-        if attribute.span.start.saturating_add(1) != attribute.identifier.start
-            || attribute.identifier.end.saturating_add(1) != attribute.span.end
-            || self.source.as_bytes().get(attribute.span.start as usize) != Some(&b'{')
-            || self.source.as_bytes().get(attribute.identifier.end as usize) != Some(&b'}')
+        let attribute = *attribute;
+        let bytes = self.source.as_bytes();
+        if attribute.span.start >= attribute.identifier.start
+            || attribute.identifier.end >= attribute.span.end
+            || bytes.get(attribute.span.start as usize) != Some(&b'{')
+            || bytes.get(attribute.span.end.saturating_sub(1) as usize) != Some(&b'}')
         {
             return Err(ProjectionError::StructuralMismatch);
         }
+        let name = bytes
+            .get(attribute.identifier.start as usize..attribute.identifier.end as usize)
+            .ok_or(ProjectionError::SourceChanged { offset: attribute.identifier.start })?;
         self.copy_to(attribute.span.start as usize)?;
+        // `<a{b} />` glues the shorthand to the tag name, which the scaffold name must not join.
+        if !self.output.ends_with(|character: char| character.is_ascii_whitespace()) {
+            self.output.push(' ');
+        }
         write!(self.output, "{}S{attribute_index}_", self.prefix)
             .expect("writing to a String cannot fail");
         self.output.push('=');
-        self.copy_original(attribute.span)?;
+        if shorthand_name_is_reserved(name) {
+            // TSX can't read a reserved word as the container's identifier; the parser writes the
+            // authored name back.
+            self.copy_original(ByteSpan::new(attribute.span.start, attribute.identifier.start))?;
+            self.push_anchored(SHORTHAND_RESERVED_NAME_STAND_IN, attribute.identifier.start)?;
+            self.copy_original(ByteSpan::new(attribute.identifier.end, attribute.span.end))?;
+        } else {
+            self.copy_original(attribute.span)?;
+        }
         self.cursor = attribute.span.end as usize;
         Ok(())
     }

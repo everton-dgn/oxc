@@ -264,6 +264,13 @@ fn dynamic_tag_expression<'a, 'element>(
             end_sentinel = true;
             continue;
         }
+        // A shorthand attribute's scaffold name: `S` in the parser projection, `V` in the lint
+        // and format projections.
+        if scaffold_ordinal(name, prefix, 'S', true).is_some()
+            || scaffold_ordinal(name, prefix, 'V', true).is_some()
+        {
+            continue;
+        }
         let Some(attribute_index) = scaffold_ordinal(name, prefix, 'A', true) else {
             if name.starts_with(prefix) {
                 return Err(DynamicTagError::MalformedAttribute { index });

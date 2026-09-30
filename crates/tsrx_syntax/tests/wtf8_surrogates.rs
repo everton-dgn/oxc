@@ -139,12 +139,14 @@ fn executable_positions_fail_closed() {
 
 #[test]
 fn speculative_jsx_marks_are_rolled_back() {
+    // `<A{}>` was the attribute here until tsrx-org/oxc#148: `@tsrx/core` rejects an empty `{}`
+    // in attribute position (TS1012), and a spread keeps the brace the test needs.
     let mut accepted = Wtf8Fixture::default();
-    accepted.text(b"const value = <A{}>committed ").high().text(b"</A>;");
+    accepted.text(b"const value = <A{...b}>committed ").high().text(b"</A>;");
     assert_eq!(accepted.classify(), [Some(OpaqueSurrogateContext::JsxText)]);
 
     let mut fixture = Wtf8Fixture::default();
-    fixture.text(b"const value = <A{}>speculative ").high().low();
+    fixture.text(b"const value = <A{...b}>speculative ").high().low();
 
     assert_eq!(fixture.classify(), [None, None]);
 }

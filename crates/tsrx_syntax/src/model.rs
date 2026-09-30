@@ -181,6 +181,68 @@ pub struct ParserShorthandAttribute {
     pub identifier: ByteSpan,
 }
 
+/// What every projection writes in place of a shorthand attribute's name that is a reserved
+/// word, such as `{class}` or `{this}`, where the lane would otherwise write the name itself.
+///
+/// `@tsrx/core` reads any identifier name there as an `Identifier`, `{this}` and `{class}`
+/// included, but TSX reads a reserved word in an expression container as a keyword or rejects it.
+/// `undefined` is an identifier reference TSX reads anywhere, and the parser writes the authored
+/// name back.
+pub const SHORTHAND_RESERVED_NAME_STAND_IN: &str = "undefined";
+
+/// Whether a shorthand attribute's authored name is a reserved word, which no lane can write as
+/// an identifier reference in an expression container.
+#[must_use]
+pub fn shorthand_name_is_reserved(name: &[u8]) -> bool {
+    matches!(
+        name,
+        b"await"
+            | b"break"
+            | b"case"
+            | b"catch"
+            | b"class"
+            | b"const"
+            | b"continue"
+            | b"debugger"
+            | b"default"
+            | b"delete"
+            | b"do"
+            | b"else"
+            | b"export"
+            | b"extends"
+            | b"false"
+            | b"finally"
+            | b"for"
+            | b"function"
+            | b"if"
+            | b"implements"
+            | b"import"
+            | b"in"
+            | b"instanceof"
+            | b"let"
+            | b"new"
+            | b"null"
+            | b"package"
+            | b"private"
+            | b"protected"
+            | b"public"
+            | b"return"
+            | b"static"
+            | b"super"
+            | b"switch"
+            | b"this"
+            | b"throw"
+            | b"true"
+            | b"try"
+            | b"typeof"
+            | b"var"
+            | b"void"
+            | b"while"
+            | b"with"
+            | b"yield"
+    )
+}
+
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EmbeddedToken {

@@ -4,7 +4,8 @@ use crate::{
     diagnostics::{ProjectionError, to_u32},
     model::{
         ByteSpan, ClauseRole, ControlContext, ControlKind, EmbeddedKind, NONE, Overlay,
-        PARSER_JSX_TEXT_GT_STAND_IN, ParserCodeBlockKind, StructuralKind,
+        PARSER_JSX_TEXT_GT_STAND_IN, ParserCodeBlockKind, SHORTHAND_RESERVED_NAME_STAND_IN,
+        StructuralKind, shorthand_name_is_reserved,
     },
 };
 
@@ -784,31 +785,51 @@ impl<'a> Builder<'a> {
     }
 
     fn parser_shorthand(&mut self, attribute_index: u32) -> Result<(), ProjectionError> {
-        let attribute = self
+        let attribute = *self
             .overlay
             .parser_shorthand_attributes
             .get(attribute_index as usize)
             .ok_or(ProjectionError::StructuralMismatch)?;
-        if attribute.span.start.saturating_add(1) != attribute.identifier.start
-            || attribute.identifier.end.saturating_add(1) != attribute.span.end
-            || self.source.as_bytes().get(attribute.span.start as usize) != Some(&b'{')
-            || self.source.as_bytes().get(attribute.identifier.end as usize) != Some(&b'}')
+        let bytes = self.source.as_bytes();
+        if attribute.span.start >= attribute.identifier.start
+            || attribute.identifier.end >= attribute.span.end
+            || bytes.get(attribute.span.start as usize) != Some(&b'{')
+            || bytes.get(attribute.span.end.saturating_sub(1) as usize) != Some(&b'}')
         {
             return Err(ProjectionError::StructuralMismatch);
         }
+        let name = self
+            .source
+            .get(attribute.identifier.start as usize..attribute.identifier.end as usize)
+            .ok_or(ProjectionError::SourceChanged { offset: attribute.identifier.start })?;
         self.copy_to(attribute.span.start as usize)?;
-        if self.type_semantic {
-            let name = self
-                .source
-                .get(attribute.identifier.start as usize..attribute.identifier.end as usize)
-                .ok_or(ProjectionError::SourceChanged { offset: attribute.identifier.start })?;
+        // `<a{b} />` glues the shorthand to the tag name, which the scaffold name must not join.
+        if !self.output.ends_with(|character: char| character.is_ascii_whitespace()) {
+            self.output.push(' ');
+        }
+        // The type lane names the attribute as the author did, so the checker sees `name={name}`.
+        // A name with an escape is no JSX attribute name, so it takes the scaffold name.
+        if self.type_semantic && !name.contains('\\') {
             self.output.push_str(name);
             self.output.push('=');
         } else {
             write!(self.output, "{}V{attribute_index}_=", self.prefix)
                 .expect("writing to a String cannot fail");
         }
-        self.copy_original(attribute.span)?;
+        if shorthand_name_is_reserved(name.as_bytes()) {
+            // TSX can't read a reserved word as the container's identifier. The lint and type
+            // lanes write `undefined`; the formatter lane writes a marker its lift turns back.
+            self.copy_original(ByteSpan::new(attribute.span.start, attribute.identifier.start))?;
+            if self.record_segments {
+                self.output.push_str(SHORTHAND_RESERVED_NAME_STAND_IN);
+            } else {
+                write!(self.output, "{}U{attribute_index}_", self.prefix)
+                    .expect("writing to a String cannot fail");
+            }
+            self.copy_original(ByteSpan::new(attribute.identifier.end, attribute.span.end))?;
+        } else {
+            self.copy_original(attribute.span)?;
+        }
         self.cursor = attribute.span.end as usize;
         Ok(())
     }

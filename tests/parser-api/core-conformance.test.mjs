@@ -6,7 +6,7 @@ import { parseModule } from "../../packages/tsrx-core-compat/dist/index.js";
 // Regression tests for the @tsrx/core 0.5.0 conformance issues tsrx-org/oxc #110, #112, #113,
 // #114, #115, #116, #117, #118, #125, #127, and #128. Every expected value below is what @tsrx/core 0.5.0 (tsrx main at
 // f78fada) returns for the same source, so a difference here is a difference from the reference
-// parser. The #111, #145, and #146 tests at the end take theirs from @tsrx/core 0.5.2.
+// parser. The #111, #145, #146, #147, and #148 tests at the end take theirs from @tsrx/core 0.5.2.
 
 function findAll(root, predicate) {
   const found = [];
@@ -1239,4 +1239,169 @@ test("#146: a branch keyword that no control owns is text, and one a control own
   );
   // Outside JSX text, a branch with no owner is still an error.
   assert.throws(() => parseModule(inTemplate("@else {<p />}"), "App.tsrx"));
+});
+
+// #147 and #148: a shorthand attribute, `{name}`, is `name={name}` with `shorthand: true` in every
+// JSX, on a dynamic tag too, as @tsrx/core 0.5.2 reads it. The values are core's, and the same
+// ones tsrx-org/yuku#25 takes from it.
+const shorthandAttributes = (ast) =>
+  findAll(ast, (node) => node.type === "JSXOpeningElement")[0].attributes.map((attribute) =>
+    attribute.type === "JSXSpreadAttribute"
+      ? [attribute.type, attribute.start, attribute.end, attribute.argument.name]
+      : [
+          attribute.start,
+          attribute.end,
+          attribute.name.name,
+          attribute.name.start,
+          attribute.name.end,
+          "shorthand" in attribute ? attribute.shorthand : "-",
+          attribute.value?.type ?? null,
+          attribute.value?.start,
+          attribute.value?.end,
+          attribute.value?.expression?.type,
+          attribute.value?.expression?.name,
+          attribute.value?.expression?.start,
+          attribute.value?.expression?.end,
+        ],
+  );
+
+const shorthandCases = {
+  "a template": [
+    "export function Link({ href }) @{\n\t<a {href} />\n}",
+    [[38, 44, "href", 39, 43, true, "JSXExpressionContainer", 38, 44, "Identifier", "href", 39, 43]],
+  ],
+  "plain JSX in a function": [
+    "export function link({ href }) {\n\treturn <a {href} />;\n}",
+    [[44, 50, "href", 45, 49, true, "JSXExpressionContainer", 44, 50, "Identifier", "href", 45, 49]],
+  ],
+  "an arrow function's JSX": [
+    "const link = (href) => <a {href} />;",
+    [[26, 32, "href", 27, 31, true, "JSXExpressionContainer", 26, 32, "Identifier", "href", 27, 31]],
+  ],
+  "a template's dynamic tag": [
+    "export function Heading({ tag, id }) @{\n\t<{tag} {id} />\n}",
+    [[48, 52, "id", 49, 51, true, "JSXExpressionContainer", 48, 52, "Identifier", "id", 49, 51]],
+  ],
+  "an element mixing every attribute form": [
+    'const v = <a x { a } y="1" {...r} {/* c */ b} {this} />;',
+    [
+      [13, 14, "x", 13, 14, "-", null, undefined, undefined, undefined, undefined, undefined, undefined],
+      [15, 20, "a", 17, 18, true, "JSXExpressionContainer", 15, 20, "Identifier", "a", 17, 18],
+      [21, 26, "y", 21, 22, "-", "Literal", 23, 26, undefined, undefined, undefined, undefined],
+      ["JSXSpreadAttribute", 27, 33, "r"],
+      [34, 45, "b", 43, 44, true, "JSXExpressionContainer", 34, 45, "Identifier", "b", 43, 44],
+      [46, 52, "this", 47, 51, true, "JSXExpressionContainer", 46, 52, "Identifier", "this", 47, 51],
+    ],
+  ],
+  "a reserved word, a line comment, and a name glued to the tag": [
+    "const v = <a{class} {await // c\n} {\\u0061} />;",
+    [
+      [12, 19, "class", 13, 18, true, "JSXExpressionContainer", 12, 19, "Identifier", "class", 13, 18],
+      [20, 33, "await", 21, 26, true, "JSXExpressionContainer", 20, 33, "Identifier", "await", 21, 26],
+      [34, 42, "a", 35, 41, true, "JSXExpressionContainer", 34, 42, "Identifier", "a", 35, 41],
+    ],
+  ],
+};
+
+test("#147/#148: a shorthand attribute is name={name} in every JSX and every JSX file", () => {
+  for (const [name, [source, expected]] of Object.entries(shorthandCases)) {
+    for (const filename of everyJsxFile) {
+      assert.deepEqual(shorthandAttributes(parseModule(source, filename)), expected, `${name} in ${filename}`);
+    }
+  }
+});
+
+test("#147: a shorthand attribute on a dynamic tag in plain JSX, after another attribute", () => {
+  const ast = parseModule(
+    'export function heading({ tag, id }) {\n\treturn <{tag} class="h" {id}>{id}</{tag}>;\n}',
+    "App.tsrx",
+  );
+  assert.deepEqual(shorthandAttributes(ast), [
+    [54, 63, "class", 54, 59, "-", "Literal", 60, 63, undefined, undefined, undefined, undefined],
+    [64, 68, "id", 65, 67, true, "JSXExpressionContainer", 64, 68, "Identifier", "id", 65, 67],
+  ]);
+});
+
+test("#148: `{await}` and `{yield}` are names in a template, as core reads them", () => {
+  const ast = parseModule("export function App() @{\n\t<a {await} {yield} />\n}", "App.tsrx");
+  assert.deepEqual(shorthandAttributes(ast), [
+    [29, 36, "await", 30, 35, true, "JSXExpressionContainer", 29, 36, "Identifier", "await", 30, 35],
+    [37, 44, "yield", 38, 43, true, "JSXExpressionContainer", 37, 44, "Identifier", "yield", 38, 43],
+  ]);
+});
+
+test("#148: a malformed shorthand attribute fails with core's code at core's position", () => {
+  for (const [source, code, pos] of [
+    ["const v = <a {a.b} />;", "TS1005", 15],
+    ["const v = <a {} />;", "TS1012", 14],
+    ['const v = <a {"s"} />;', "TS1012", 14],
+    ["const v = <a {a />;", "TS1005", 16],
+    ["const v = <a {enum} />;", "TS1012", 14],
+    ["const v = <a {a}={b} />;", "TS1012", 16],
+  ]) {
+    for (const filename of everyJsxFile) {
+      assert.throws(
+        () => parseModule(source, filename),
+        (error) => error.code === code && error.pos === pos,
+        `${source} in ${filename}`,
+      );
+    }
+  }
+});
+
+test("#148: a shorthand name with escapes is read, and a bad or keyword escape fails, as in core", () => {
+  // Bugbot on tsrx-org/oxc#158: escapes are decoded before `enum`, `interface`, and `type` are
+  // refused, an escaped keyword fails at the name, and a bad escape fails where acorn fails it.
+  for (const filename of everyJsxFile) {
+    assert.deepEqual(
+      shorthandAttributes(parseModule("const v = <a {\\u0061} {\\u{62}c} {a\\u0031} {\\u00e9} />;", filename)),
+      [
+        [13, 21, "a", 14, 20, true, "JSXExpressionContainer", 13, 21, "Identifier", "a", 14, 20],
+        [22, 31, "bc", 23, 30, true, "JSXExpressionContainer", 22, 31, "Identifier", "bc", 23, 30],
+        [32, 41, "a1", 33, 40, true, "JSXExpressionContainer", 32, 41, "Identifier", "a1", 33, 40],
+        [42, 50, "é", 43, 49, true, "JSXExpressionContainer", 42, 50, "Identifier", "é", 43, 49],
+      ],
+      filename,
+    );
+    for (const [source, code, pos] of [
+      ["const v = <a {t\\u0079pe} />;", "TS1012", 14],
+      ["const v = <a {\\u0065num} />;", "TS1012", 14],
+      ["const v = <a {\\u0063lass} />;", "TS1260", 14],
+      ["const v = <a {\\u0031a} />;", "TS1127", 14],
+      ["const v = <a {a\\u{0}} />;", "TS1127", 15],
+      ["const v = <a {\\x61} />;", "TS1127", 15],
+      ["const v = <a {ab\\u00} />;", "TS1125", 18],
+      ["const v = <a {\\u{zz}} />;", "TS1125", 17],
+      ["const v = <a {ab\\u{110000}} />;", "TS1198", 19],
+    ]) {
+      assert.throws(
+        () => parseModule(source, filename),
+        (error) => error.code === code && error.pos === pos,
+        `${source} in ${filename}`,
+      );
+    }
+  }
+});
+
+test("#148: an escaped combining mark or ID scalar continues a shorthand name, and a symbol fails", () => {
+  // Bugbot on tsrx-org/oxc#158: an escaped continue character is any ID_Continue scalar, not
+  // only a letter or digit, and an escaped Other_ID_Start scalar starts a name.
+  for (const filename of everyJsxFile) {
+    assert.deepEqual(
+      shorthandAttributes(parseModule("const v = <a {a\\u0301} {\\u212E} {a\\u203F} />;", filename)),
+      [
+        [13, 22, "á", 14, 21, true, "JSXExpressionContainer", 13, 22, "Identifier", "á", 14, 21],
+        [23, 31, "℮", 24, 30, true, "JSXExpressionContainer", 23, 31, "Identifier", "℮", 24, 30],
+        [32, 41, "a‿", 33, 40, true, "JSXExpressionContainer", 32, 41, "Identifier", "a‿", 33, 40],
+      ],
+      filename,
+    );
+    for (const source of ["const v = <a {a\\u{1F600}} />;", "const v = <a {a\\u2192} />;"]) {
+      assert.throws(
+        () => parseModule(source, filename),
+        (error) => error.code === "TS1127" && error.pos === 15,
+        `${source} in ${filename}`,
+      );
+    }
+  }
 });

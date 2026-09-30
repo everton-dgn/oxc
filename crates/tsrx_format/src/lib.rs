@@ -1007,6 +1007,52 @@ mod tests {
     }
 
     #[test]
+    fn shorthand_attributes_print_back_as_shorthand_in_every_jsx() {
+        // tsrx-org/oxc#147 and #148: `{name}` is `name={name}` on a dynamic tag and in plain JSX,
+        // as `@tsrx/core` reads it, and prints back as written: trivia inside its braces follows
+        // Oxfmt's container layout, and a reserved word such as `{class}` keeps its name.
+        let source = concat!(
+            "export function Heading({ tag, id, href }) @{\n",
+            "\t<div>\n",
+            "\t\t<{tag} {id} />\n",
+            "\t\t<{tag} class=\"h\" { id }>{id}</{tag}>\n",
+            "\t\t<a{href} {/* note */ href} {class} {this} />\n",
+            "\t</div>\n",
+            "}\n",
+            "\n",
+            "export function link({ href }) {\n",
+            "\treturn <a {href} data-x={1} />;\n",
+            "}\n",
+            "\n",
+            "const arrow = (href) => <a {href} />;\n",
+        );
+        let first = format_text(Path::new("App.tsrx"), source).unwrap();
+        assert_eq!(
+            first.code,
+            concat!(
+                "export function Heading({ tag, id, href }) @{\n",
+                "  <div>\n",
+                "    <{tag} {id} />\n",
+                "    <{tag} class=\"h\" {id}>\n",
+                "      {id}\n",
+                "    </{tag}>\n",
+                "    <a {href} {/* note */ href} {class} {this} />\n",
+                "  </div>;\n",
+                "}\n",
+                "\n",
+                "export function link({ href }) {\n",
+                "  return <a {href} data-x={1} />;\n",
+                "}\n",
+                "\n",
+                "const arrow = (href) => <a {href} />;\n",
+            )
+        );
+        let second = format_text(Path::new("App.tsrx"), &first.code).unwrap();
+        assert_eq!(second.code, first.code);
+        assert!(!second.changed);
+    }
+
+    #[test]
     fn sort_imports_orders_a_tsrx_import_chunk_and_converges() {
         let source = concat!(
             "import { z } from \"zebra\";\n",
