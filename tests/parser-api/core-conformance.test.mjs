@@ -6,8 +6,8 @@ import { parseModule } from "../../packages/tsrx-core-compat/dist/index.js";
 // Regression tests for the @tsrx/core 0.5.0 conformance issues tsrx-org/oxc #110, #112, #113,
 // #114, #115, #116, #117, #118, #125, #127, and #128. Every expected value below is what @tsrx/core 0.5.0 (tsrx main at
 // f78fada) returns for the same source, so a difference here is a difference from the reference
-// parser. The #111, #145, #146, #147, #148, #149, #152, and #153 tests at the end take theirs
-// from @tsrx/core 0.5.2.
+// parser. The #111, #145, #146, #147, #148, #149, #151, #152, and #153 tests, and the shape tests
+// at the end, take theirs from @tsrx/core 0.5.2.
 
 function findAll(root, predicate) {
   const found = [];
@@ -1582,6 +1582,179 @@ test("#149: a member access, call, or `!` after a control-flow expression fails 
   // `!=` is an operator, and a parenthesized control takes a subscript.
   assert.doesNotThrow(() => parseModule("const x = @if (a) {\n\t<p />\n} != 1;", "App.tsrx"));
   assert.doesNotThrow(() => parseModule("const x = (@if (a) {\n\t<p />\n}).length;", "App.tsrx"));
+});
+
+// `undefined` spelled out, so a row tells a key core leaves undefined apart from a null.
+const spelled = (value) => (value === undefined ? "undefined" : value);
+
+test("a signature's and a function type's parameters and return type have core's names", () => {
+  const source = [
+    "interface I {",
+    "\t(a: A): R;",
+    "\tnew (b: B): I;",
+    "\tm?<T extends unknown>(c: T): R;",
+    "\tn();",
+    "}",
+    "type F = (d: D) => R;",
+    "type C = abstract new () => R;",
+    "type G = new () => R;",
+  ].join("\n");
+  const rows = findAll(parseModule(source, "App.tsrx"), (node) => /Signature|FunctionType|ConstructorType/u.test(node.type ?? ""))
+    .sort((left, right) => left.start - right.start)
+    .map((node) => [
+      node.type,
+      node.start,
+      node.end,
+      "typeParameters" in node,
+      node.typeParameters?.params.map(({ name, constraint, default: fallback }) => [name.name, constraint?.type, spelled(fallback)]),
+      node.parameters.map(({ name }) => name),
+      spelled(node.typeAnnotation?.start),
+      spelled(node.abstract),
+      "params" in node || "returnType" in node,
+    ]);
+  assert.deepEqual(rows, [
+    ["TSCallSignatureDeclaration", 15, 25, true, undefined, ["a"], 21, "undefined", false],
+    ["TSConstructSignatureDeclaration", 27, 41, true, undefined, ["b"], 37, "undefined", false],
+    ["TSMethodSignature", 43, 74, true, [["T", "TSUnknownKeyword", "undefined"]], ["c"], 70, "undefined", false],
+    ["TSMethodSignature", 76, 80, true, undefined, [], "undefined", "undefined", false],
+    ["TSFunctionType", 92, 103, true, undefined, ["d"], 99, "undefined", false],
+    ["TSConstructorType", 114, 134, true, undefined, [], 130, true, false],
+    ["TSConstructorType", 145, 156, true, undefined, [], 152, false, false],
+  ]);
+  // A declared function keeps `params` and `returnType`, as it does in core.
+  const declared = parseModule("declare function d(a: A): R;", "App.tsrx").body[0];
+  assert.deepEqual([declared.params.length, declared.returnType.type, "parameters" in declared], [1, "TSTypeAnnotation", false]);
+});
+
+test("a type parameter without a constraint or default leaves both undefined, as core does", () => {
+  const [parameter] = parseModule("type X<P> = P;", "App.tsrx").body[0].typeParameters.params;
+  assert.deepEqual(
+    ["constraint" in parameter, spelled(parameter.constraint), "default" in parameter, spelled(parameter.default)],
+    [true, "undefined", true, "undefined"],
+  );
+});
+
+test("a JSX member name is not computed, as core gives it", () => {
+  const names = findAll(parseModule("const v = <main><UI.List /><a.b.c /></main>;", "App.tsrx"), (node) => node.type === "JSXMemberExpression")
+    .map(({ start, end, computed }) => [start, end, computed])
+    .sort((left, right) => left[0] - right[0] || left[1] - right[1]);
+  assert.deepEqual(names, [[17, 24, false], [28, 31, false], [28, 33, false]]);
+});
+
+// #151: in an `@for` with `index` or `key`, a value may be parenthesized, as @tsrx/core 0.5.2
+// reads it. Core drops the parentheses, so each value spans the expression inside them and has no
+// `extra.parenthesized`. Each value is `[type, start, end, loc…, parenthesized]`, from core.
+const forHeaderValue = (node) =>
+  node && [
+    node.type,
+    node.start,
+    node.end,
+    node.loc.start.line,
+    node.loc.start.column,
+    node.loc.end.line,
+    node.loc.end.column,
+    node.extra?.parenthesized ?? false,
+  ];
+
+const forHeader = (ast) => {
+  const loop = findAll(ast, (node) => node.type === "JSXForExpression")[0];
+  return [forHeaderValue(loop.right), forHeaderValue(loop.index ?? null), forHeaderValue(loop.key ?? null)];
+};
+
+const inForStatement = (header) =>
+  `export function List({ items, version, list }) @{\n\t@for (${header}) {\n\t\t<li>{item}</li>\n\t}\n}`;
+const inForExpression = (header) => `const rows = @for (${header}) {\n\t<li>{item}</li>\n};`;
+
+const parenthesizedForHeaders = {
+  "a parenthesized iterable with a key": [
+    "const item of (items); key item",
+    [["Identifier", 72, 77, 2, 22, 2, 27, false], null, ["Identifier", 84, 88, 2, 34, 2, 38, false]],
+    [["Identifier", 34, 39, 1, 34, 1, 39, false], null, ["Identifier", 46, 50, 1, 46, 1, 50, false]],
+  ],
+  "a parenthesized iterable with an index": [
+    "const item of (items); index i",
+    [["Identifier", 72, 77, 2, 22, 2, 27, false], ["Identifier", 86, 87, 2, 36, 2, 37, false], null],
+    [["Identifier", 34, 39, 1, 34, 1, 39, false], ["Identifier", 48, 49, 1, 48, 1, 49, false], null],
+  ],
+  "a parenthesized key": [
+    "const item of items; key (item)",
+    [["Identifier", 71, 76, 2, 21, 2, 26, false], null, ["Identifier", 83, 87, 2, 33, 2, 37, false]],
+    [["Identifier", 33, 38, 1, 33, 1, 38, false], null, ["Identifier", 45, 49, 1, 45, 1, 49, false]],
+  ],
+  "Ripple's parenthesized sequence": [
+    "const item of (version.value, list); key item",
+    [["SequenceExpression", 72, 91, 2, 22, 2, 41, false], null, ["Identifier", 98, 102, 2, 48, 2, 52, false]],
+    [["SequenceExpression", 34, 53, 1, 34, 1, 53, false], null, ["Identifier", 60, 64, 1, 60, 1, 64, false]],
+  ],
+  "nested parentheses on every value": [
+    "const item of ((items)); index (i); key ((item.id))",
+    [
+      ["Identifier", 73, 78, 2, 23, 2, 28, false],
+      ["Identifier", 89, 90, 2, 39, 2, 40, false],
+      ["MemberExpression", 99, 106, 2, 49, 2, 56, false],
+    ],
+    [
+      ["Identifier", 35, 40, 1, 35, 1, 40, false],
+      ["Identifier", 51, 52, 1, 51, 1, 52, false],
+      ["MemberExpression", 61, 68, 1, 61, 1, 68, false],
+    ],
+  ],
+  "a parenthesized sequence key": [
+    "const item of items; index i; key (item.id, item)",
+    [
+      ["Identifier", 71, 76, 2, 21, 2, 26, false],
+      ["Identifier", 84, 85, 2, 34, 2, 35, false],
+      ["SequenceExpression", 92, 105, 2, 42, 2, 55, false],
+    ],
+    [
+      ["Identifier", 33, 38, 1, 33, 1, 38, false],
+      ["Identifier", 46, 47, 1, 46, 1, 47, false],
+      ["SequenceExpression", 54, 67, 1, 54, 1, 67, false],
+    ],
+  ],
+  "spaces and comments inside the parentheses": [
+    "const item of ( /* a */ items ); key ( item // b\n)",
+    [["Identifier", 81, 86, 2, 31, 2, 36, false], null, ["Identifier", 96, 100, 2, 46, 2, 50, false]],
+    [["Identifier", 43, 48, 1, 43, 1, 48, false], null, ["Identifier", 58, 62, 1, 58, 1, 62, false]],
+  ],
+};
+
+test("#151: a parenthesized iterable, index, or key in an @for header is the expression inside", () => {
+  for (const [name, [header, statement, expression]] of Object.entries(parenthesizedForHeaders)) {
+    assert.deepEqual(forHeader(parseModule(inForStatement(header), "App.tsrx")), statement, `${name}, statement`);
+    assert.deepEqual(forHeader(parseModule(inForExpression(header), "App.tsrx")), expression, `${name}, expression`);
+  }
+});
+
+test("#151: a parenthesized index must still be one name, as in core", () => {
+  for (const index of ["(i, j)", "(i) + 1", "(x.value)"]) {
+    assert.throws(
+      () => parseModule(inForExpression(`const item of items; index ${index}`), "App.tsrx"),
+      { code: "TSRX1011" },
+      index,
+    );
+  }
+});
+
+test("#151: parentheses inside a header value, not around it, stay in the value's span", () => {
+  // Bugbot on tsrx-org/oxc#163: a value that only starts or ends with a grouped operand spans
+  // from that operand's `(` or to its `)`, in core as in OXC, so no stray parenthesis is left
+  // outside it. `[type, start, end]` of the iterable and of the key are core's.
+  const cases = [
+    ["(a) + (b)", ["BinaryExpression", 33, 42], ["BinaryExpression", 44, 53]],
+    ["(a)(b)", ["CallExpression", 33, 39], ["CallExpression", 44, 50]],
+    ["(a, b)[0]", ["MemberExpression", 33, 42], ["MemberExpression", 44, 53]],
+    ["(a) ? (b) : (c)", ["ConditionalExpression", 33, 48], ["ConditionalExpression", 44, 59]],
+    ["(a).b + (c)", ["BinaryExpression", 33, 44], ["BinaryExpression", 44, 55]],
+    ["((a) , (b))", ["SequenceExpression", 34, 43], ["SequenceExpression", 45, 54]],
+  ];
+  const loopOf = (header) =>
+    findAll(parseModule(inForExpression(header), "App.tsrx"), (node) => node.type === "JSXForExpression")[0];
+  const span = (node) => [node.type, node.start, node.end];
+  for (const [value, right, key] of cases) {
+    assert.deepEqual(span(loopOf(`const item of ${value}; key item`).right), right, `of ${value}`);
+    assert.deepEqual(span(loopOf(`const item of items; key ${value}`).key), key, `key ${value}`);
+  }
 });
 
 // Each opening element in source order as `[name, start, end, typeArguments]`, the type

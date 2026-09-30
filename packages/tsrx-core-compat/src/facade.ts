@@ -1269,6 +1269,15 @@ function materializeDirectiveRange(value, positionAt) {
   if (value.loc?.end != null) value.loc.end = positionAt(value.end);
 }
 
+// The TypeScript nodes whose parameters and return type core names as acorn-typescript does.
+const SIGNATURE_TYPES = new Set([
+  "TSCallSignatureDeclaration",
+  "TSConstructSignatureDeclaration",
+  "TSConstructorType",
+  "TSFunctionType",
+  "TSMethodSignature",
+]);
+
 function omitTsrxCoreCompatDefault(type, key, value) {
   if (
     Array.isArray(value) &&
@@ -1525,6 +1534,25 @@ function materializeCompatibilityProgram(program, source, filename, loose, posit
       value.metadata ??= { path: [] };
       value.metadata.path ??= [];
       value.metadata.module_keyword = value.kind;
+    }
+
+    // Core names a signature's or function type's parameters `parameters` and its return type
+    // `typeAnnotation`, as acorn-typescript does, and always has a `typeParameters` key.
+    if (SIGNATURE_TYPES.has(value.type) && "params" in value) {
+      const { params, returnType } = value;
+      delete value.params;
+      delete value.returnType;
+      value.typeParameters = value.typeParameters ?? undefined;
+      value.parameters = params;
+      if (returnType != null) value.typeAnnotation = returnType;
+    }
+
+    if (value.type === "JSXMemberExpression") value.computed = false;
+    if (value.type === "TSConstructorType") value.abstract ??= false;
+    // Core leaves a type parameter's missing constraint and default undefined, not null.
+    if (value.type === "TSTypeParameter") {
+      if (value.constraint === null) value.constraint = undefined;
+      if (value.default === null) value.default = undefined;
     }
 
     // Core gives a mapped type's key and constraint as one `typeParameter`, as acorn-typescript does.

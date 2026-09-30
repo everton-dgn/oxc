@@ -36,6 +36,81 @@ pub(super) fn require_authored_object_span(
     }
 }
 
+/// An `@for` header value is authored as `of (items); key (item)`, and @tsrx/core, like any
+/// parser that drops parentheses, spans only the expression inside them. The node may therefore
+/// sit inside its authored span, as long as everything around it is balanced parentheses,
+/// whitespace, and comments.
+pub(super) fn require_header_value_span(
+    tape: &FlatTape,
+    object: RecordIndex,
+    segments: &[ProjectionSegment],
+    source: &str,
+    authored: ByteSpan,
+) -> Result<(), TsrxParseError> {
+    let start = map_endpoint(segments, scalar_u32(tape, object, "start")?, true);
+    let end = map_endpoint(segments, scalar_u32(tape, object, "end")?, false);
+    match (start, end) {
+        (Some(start), Some(end))
+            if authored.start <= start
+                && start <= end
+                && end <= authored.end
+                && header_value_wrapping(source.as_bytes(), authored, start, end) =>
+        {
+            Ok(())
+        }
+        _ => Err(TsrxParseError::Unsupported("annotated header value span is synthetic")),
+    }
+}
+
+/// Whether `source[authored]` is `source[start..end]` inside balanced parentheses, whitespace,
+/// and comments only.
+fn header_value_wrapping(source: &[u8], authored: ByteSpan, start: u32, end: u32) -> bool {
+    let (Ok(authored_start), Ok(authored_end), Ok(start), Ok(end)) = (
+        usize::try_from(authored.start),
+        usize::try_from(authored.end),
+        usize::try_from(start),
+        usize::try_from(end),
+    ) else {
+        return false;
+    };
+    let (Some(before), Some(after)) =
+        (source.get(authored_start..start), source.get(end..authored_end))
+    else {
+        return false;
+    };
+    match (count_wrapping(before, b'('), count_wrapping(after, b')')) {
+        (Some(open), Some(close)) => open == close,
+        _ => false,
+    }
+}
+
+/// How many `paren` bytes `text` holds, or `None` if it holds anything besides them,
+/// whitespace, and comments.
+fn count_wrapping(text: &[u8], paren: u8) -> Option<usize> {
+    let mut count = 0_usize;
+    let mut index = 0_usize;
+    while let Some(&byte) = text.get(index) {
+        if byte == paren {
+            count += 1;
+            index += 1;
+        } else if byte.is_ascii_whitespace() {
+            index += 1;
+        } else if text.get(index..index + 2) == Some(b"/*") {
+            let close = text.get(index + 2..)?.windows(2).position(|pair| pair == b"*/")?;
+            index += close + 4;
+        } else if text.get(index..index + 2) == Some(b"//") {
+            let line = text[index..]
+                .iter()
+                .position(|byte| matches!(byte, b'\n' | b'\r'))
+                .unwrap_or(text.len() - index);
+            index += line;
+        } else {
+            return None;
+        }
+    }
+    Some(count)
+}
+
 pub(super) fn require_object_span_within(
     tape: &FlatTape,
     object: RecordIndex,

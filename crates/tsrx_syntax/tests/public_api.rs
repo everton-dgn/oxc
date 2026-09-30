@@ -476,6 +476,30 @@ fn rejects_orphan_clauses_and_invalid_index_annotation() {
 }
 
 #[test]
+fn an_index_name_may_sit_inside_parentheses_and_comments_in_both_scanners() {
+    // tsrx-org/oxc#151: @tsrx/core reads the `index` value as an expression that must be an
+    // identifier, so `index (i)` and `index /* n */ i` name the index and `index (i, j)` does not.
+    let header =
+        |index: &str| format!("function View() @{{ @for(const x of xs;index {index}){{}} }}");
+    for index in ["(i)", "((i))", "( /* n */ i // m\n)", "/* n */ i /* m */"] {
+        let source = header(index);
+        assert!(scan(&source).is_ok(), "{source}");
+        let overlay = scan_for_parser(&source).unwrap();
+        // The type lane declares the bare name, since `let (i) = 0;` is not TypeScript.
+        let projection = project_for_types(&source, &overlay).unwrap();
+        assert!(projection.source().contains("\nlet i = 0;\n"), "{}", projection.source());
+    }
+    for index in ["(i, j)", "(i)(j)", "((i)", "(i))", "(i) + 1", "()"] {
+        let source = header(index);
+        assert!(matches!(scan(&source), Err(ProjectionError::MalformedSyntax { .. })), "{source}");
+        assert!(
+            matches!(scan_for_parser(&source), Err(ProjectionError::MalformedSyntax { .. })),
+            "{source}"
+        );
+    }
+}
+
+#[test]
 fn repeated_generics_do_not_get_swallowed_as_jsx() {
     let mut source = String::from("function View() @{\n");
     for _ in 0..256 {
