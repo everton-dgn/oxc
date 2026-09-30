@@ -1582,6 +1582,8 @@ test("#149: a member access, call, or `!` after a control-flow expression fails 
   // `!=` is an operator, and a parenthesized control takes a subscript.
   assert.doesNotThrow(() => parseModule("const x = @if (a) {\n\t<p />\n} != 1;", "App.tsrx"));
   assert.doesNotThrow(() => parseModule("const x = (@if (a) {\n\t<p />\n}).length;", "App.tsrx"));
+});
+
 // Each opening element in source order as `[name, start, end, typeArguments]`, the type
 // arguments as `[start, end, param types]`, or null for an element without them.
 const openingTypeArguments = (ast) =>
