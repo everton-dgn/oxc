@@ -6,8 +6,8 @@ import { parseModule } from "../../packages/tsrx-core-compat/dist/index.js";
 // Regression tests for the @tsrx/core 0.5.0 conformance issues tsrx-org/oxc #110, #112, #113,
 // #114, #115, #116, #117, #118, #125, #127, and #128. Every expected value below is what @tsrx/core 0.5.0 (tsrx main at
 // f78fada) returns for the same source, so a difference here is a difference from the reference
-// parser. The #111, #145, #146, #147, #148, #149, #151, #152, and #153 tests, and the shape tests
-// at the end, take theirs from @tsrx/core 0.5.2.
+// parser. The #111, #145, #146, #147, #148, #149, #150, #151, #152, and #153 tests, and the shape
+// tests at the end, take theirs from @tsrx/core 0.5.2.
 
 function findAll(root, predicate) {
   const found = [];
@@ -1879,4 +1879,152 @@ test("#153: a typed element that starts a line after a statement is markup, as c
   ]) {
     assert.deepEqual(openingTypeArguments(parseModule(source, "App.tsrx")), expected, source);
   }
+});
+
+const RETURN_TYPE_NODES = new Set([
+  "FunctionDeclaration",
+  "FunctionExpression",
+  "MethodDefinition",
+  "Property",
+  "TSTypeAnnotation",
+  "TSTypeReference",
+  "TSTypeParameterInstantiation",
+  "JSXCodeBlock",
+  "JSXElement",
+]);
+
+const returnTypeShape = (ast) =>
+  findAll(ast, (node) => RETURN_TYPE_NODES.has(node.type)).map(({ type, start, end, loc }) => [
+    type,
+    start,
+    end,
+    loc.start.line,
+    loc.start.column,
+    loc.end.line,
+    loc.end.column,
+  ]);
+
+test("#150: a template body after a return type that ends in type arguments is the function body", () => {
+  for (const [source, expected] of [
+    [
+      "function App(): Element<'div'> @{\n\t<div />\n}",
+      [
+        ["FunctionDeclaration", 0, 44, 1, 0, 3, 1],
+        ["TSTypeAnnotation", 14, 30, 1, 14, 1, 30],
+        ["TSTypeReference", 16, 30, 1, 16, 1, 30],
+        ["TSTypeParameterInstantiation", 23, 30, 1, 23, 1, 30],
+        ["JSXCodeBlock", 31, 44, 1, 31, 3, 1],
+        ["JSXElement", 35, 42, 2, 1, 2, 8],
+      ],
+    ],
+    [
+      "const App = function (): Element<'div'> @{\n\t<div />\n};",
+      [
+        ["FunctionExpression", 12, 53, 1, 12, 3, 1],
+        ["TSTypeAnnotation", 23, 39, 1, 23, 1, 39],
+        ["TSTypeReference", 25, 39, 1, 25, 1, 39],
+        ["TSTypeParameterInstantiation", 32, 39, 1, 32, 1, 39],
+        ["JSXCodeBlock", 40, 53, 1, 40, 3, 1],
+        ["JSXElement", 44, 51, 2, 1, 2, 8],
+      ],
+    ],
+    [
+      "class View {\n\trender(): Element<'div'> @{\n\t\t<div />\n\t}\n}",
+      [
+        ["MethodDefinition", 14, 54, 2, 1, 4, 2],
+        ["FunctionExpression", 20, 54, 2, 7, 4, 2],
+        ["TSTypeAnnotation", 22, 38, 2, 9, 2, 25],
+        ["TSTypeReference", 24, 38, 2, 11, 2, 25],
+        ["TSTypeParameterInstantiation", 31, 38, 2, 18, 2, 25],
+        ["JSXCodeBlock", 39, 54, 2, 26, 4, 2],
+        ["JSXElement", 44, 51, 3, 2, 3, 9],
+      ],
+    ],
+    [
+      "const view = {\n\trender(): Element<'div'> @{\n\t\t<div />\n\t},\n};",
+      [
+        ["Property", 16, 56, 2, 1, 4, 2],
+        ["FunctionExpression", 22, 56, 2, 7, 4, 2],
+        ["TSTypeAnnotation", 24, 40, 2, 9, 2, 25],
+        ["TSTypeReference", 26, 40, 2, 11, 2, 25],
+        ["TSTypeParameterInstantiation", 33, 40, 2, 18, 2, 25],
+        ["JSXCodeBlock", 41, 56, 2, 26, 4, 2],
+        ["JSXElement", 46, 53, 3, 2, 3, 9],
+      ],
+    ],
+    [
+      // The shape of Ripple's `packages/ripple/tests/server/dynamic-elements.test.tsrx`.
+      "export function Dynamic({ tag }: {\n\ttag: string;\n}): TSRXElement<'div'> @{\n\t<div />\n}",
+      [
+        ["FunctionDeclaration", 7, 85, 1, 7, 5, 1],
+        ["Property", 26, 29, 1, 26, 1, 29],
+        ["TSTypeAnnotation", 31, 50, 1, 31, 3, 1],
+        ["TSTypeAnnotation", 39, 47, 2, 4, 2, 12],
+        ["TSTypeAnnotation", 51, 71, 3, 2, 3, 22],
+        ["TSTypeReference", 53, 71, 3, 4, 3, 22],
+        ["TSTypeParameterInstantiation", 64, 71, 3, 15, 3, 22],
+        ["JSXCodeBlock", 72, 85, 3, 23, 5, 1],
+        ["JSXElement", 76, 83, 4, 1, 4, 8],
+      ],
+    ],
+    [
+      "function App(): Promise<Map<string, () => void>> /* c */ @{\n\t<div />\n}",
+      [
+        ["FunctionDeclaration", 0, 70, 1, 0, 3, 1],
+        ["TSTypeAnnotation", 14, 48, 1, 14, 1, 48],
+        ["TSTypeReference", 16, 48, 1, 16, 1, 48],
+        ["TSTypeParameterInstantiation", 23, 48, 1, 23, 1, 48],
+        ["TSTypeReference", 24, 47, 1, 24, 1, 47],
+        ["TSTypeParameterInstantiation", 27, 47, 1, 27, 1, 47],
+        ["TSTypeAnnotation", 39, 46, 1, 39, 1, 46],
+        ["JSXCodeBlock", 57, 70, 1, 57, 3, 1],
+        ["JSXElement", 61, 68, 2, 1, 2, 8],
+      ],
+    ],
+    [
+      // A `>` or quote in a comment inside the list is not read (Bugbot on tsrx-org/oxc#162).
+      "function App(): Foo<A /* > ' */> @{\n\t<div />\n}",
+      [
+        ["FunctionDeclaration", 0, 46, 1, 0, 3, 1],
+        ["TSTypeAnnotation", 14, 32, 1, 14, 1, 32],
+        ["TSTypeReference", 16, 32, 1, 16, 1, 32],
+        ["TSTypeParameterInstantiation", 19, 32, 1, 19, 1, 32],
+        ["TSTypeReference", 20, 21, 1, 20, 1, 21],
+        ["JSXCodeBlock", 33, 46, 1, 33, 3, 1],
+        ["JSXElement", 37, 44, 2, 1, 2, 8],
+      ],
+    ],
+  ]) {
+    assert.deepEqual(returnTypeShape(parseModule(source, "App.tsrx")), expected, source);
+  }
+});
+
+test("#150: a template body after a comparison is still an expression code block", () => {
+  const [declaration] = parseModule("const x = a > @{ <div /> };", "App.tsrx").body;
+  const { type, operator, start, end, right } = declaration.declarations[0].init;
+  assert.deepEqual(
+    [type, operator, start, end, right.type, right.start, right.end, right.render.type],
+    ["BinaryExpression", ">", 10, 26, "JSXCodeBlock", 14, 26, "JSXElement"],
+  );
+  // None of these follows a return type annotation, so each `@{` stays an expression code block
+  // (Bugbot on tsrx-org/oxc#162 found each one read as a function body by an earlier approach).
+  const [shift] = parseModule("const x = a < b << c > @{ <div /> };", "App.tsrx").body;
+  const outer = shift.declarations[0].init;
+  assert.deepEqual(
+    [outer.operator, outer.start, outer.end, outer.left.operator, outer.left.start, outer.left.end],
+    [">", 10, 35, "<", 10, 20],
+  );
+  assert.deepEqual([outer.right.type, outer.right.start, outer.right.end], ["JSXCodeBlock", 23, 35]);
+  const comparisons = (source) =>
+    findAll(parseModule(source, "App.tsrx"), (node) => node.operator === ">").map(({ start, end, right }) => [
+      start,
+      end,
+      right.type,
+      right.start,
+      right.end,
+    ]);
+  assert.deepEqual(comparisons("a < b\nc > @{ <div /> };"), [[6, 22, "JSXCodeBlock", 10, 22]]);
+  assert.deepEqual(comparisons("x = (a <<= b, c > @{ <div /> });"), [[14, 30, "JSXCodeBlock", 18, 30]]);
+  assert.deepEqual(comparisons("x <<= y > @{ <div /> };"), [[6, 22, "JSXCodeBlock", 10, 22]]);
+  assert.deepEqual(comparisons("y = c ? f(a) : b > @{ <div /> };"), [[15, 31, "JSXCodeBlock", 19, 31]]);
 });

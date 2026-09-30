@@ -49,7 +49,16 @@ impl Scanner<'_> {
         let mut closed_control_paren = false;
         let mut pending_statement_body = false;
         let mut pending_arrow_body = false;
-        let mut parens = TinyStack::<bool, 16>::new();
+        // Per open `(`: whether it follows a control keyword, and whether it can open a parameter
+        // list, so its `)` may be followed by a return type annotation.
+        let mut parens = TinyStack::<(bool, bool), 16>::new();
+        // Whether the last token, comments aside, can end a method or function name, so a `(`
+        // after it can open a parameter list: a name or keyword (`render`, `function`), a quoted
+        // or computed name (`'render'`, `[key]`), an optional marker (`render?`), or the `>` that
+        // closes type parameters (`App<T>`).
+        let mut pending_parameter_list = false;
+        // The offset of a template body `@{` found right after a return type annotation.
+        let mut return_type_body = None;
 
         while index < self.bytes.len() {
             let byte = self.bytes[index];
@@ -60,9 +69,12 @@ impl Scanner<'_> {
 
             let follows_arrow = pending_arrow_body;
             pending_arrow_body = false;
+            let follows_name = pending_parameter_list;
+            pending_parameter_list = false;
             match byte {
                 b'\'' | b'"' => {
                     index = self.skip_quote(index, byte)?;
+                    pending_parameter_list = true;
                     can_start_expression = false;
                     can_start_jsx = false;
                     pending_control_paren = false;
@@ -80,10 +92,12 @@ impl Scanner<'_> {
                 b'/' if self.bytes.get(index + 1) == Some(&b'/') => {
                     index = self.skip_line_comment(index + 2);
                     pending_arrow_body = follows_arrow;
+                    pending_parameter_list = follows_name;
                 }
                 b'/' if self.bytes.get(index + 1) == Some(&b'*') => {
                     index = self.skip_block_comment(index)?;
                     pending_arrow_body = follows_arrow;
+                    pending_parameter_list = follows_name;
                 }
                 b'/' if can_start_expression => {
                     index = self.skip_regex(index)?;
@@ -196,7 +210,10 @@ impl Scanner<'_> {
                     pending_statement_body = false;
                 }
                 b'@' if self.bytes.get(index + 1) == Some(&b'{') => {
-                    if (can_start_expression || pending_statement_body) && !follows_arrow {
+                    if (can_start_expression || pending_statement_body)
+                        && !follows_arrow
+                        && return_type_body != Some(index)
+                    {
                         index =
                             self.scan_parser_code_block(index, ParserCodeBlockKind::Expression)?;
                         can_start_expression = false;
@@ -255,7 +272,7 @@ impl Scanner<'_> {
                                     == Some(b'='));
                     delimiters.push((close, block));
                     if byte == b'(' {
-                        parens.push(pending_control_paren);
+                        parens.push((pending_control_paren, follows_name));
                     }
                     pending_control_paren = false;
                     closed_control_paren = false;
@@ -281,7 +298,14 @@ impl Scanner<'_> {
                         index += 1;
                     }
                     can_start_expression = if byte == b')' {
-                        let control = parens.pop().unwrap_or(false);
+                        let (control, parameters) = parens.pop().unwrap_or((false, false));
+                        if parameters
+                            && let Ok(colon) = self.skip_trivia(index)
+                            && self.bytes.get(colon) == Some(&b':')
+                            && let Some(body) = self.return_type_template_body(colon)
+                        {
+                            return_type_body = Some(body);
+                        }
                         closed_control_paren = control;
                         control
                     } else if byte == b'}' {
@@ -292,11 +316,13 @@ impl Scanner<'_> {
                         false
                     };
                     can_start_jsx = (byte == b'}' && closed_block) || can_start_expression;
+                    pending_parameter_list = byte == b']';
                     pending_control_paren = false;
                     pending_statement_body = false;
                 }
                 b'0'..=b'9' => {
                     index = self.skip_number(index);
+                    pending_parameter_list = true;
                     can_start_expression = false;
                     can_start_jsx = false;
                     pending_control_paren = false;
@@ -333,6 +359,7 @@ impl Scanner<'_> {
                     can_start_jsx = can_start_expression;
                     closed_control_paren = false;
                     pending_statement_body = matches!(identifier, b"else" | b"do");
+                    pending_parameter_list = true;
                     index = end;
                 }
                 b'+' | b'-'
@@ -366,6 +393,7 @@ impl Scanner<'_> {
                 _ => {
                     pending_arrow_body =
                         byte == b'>' && previous_significant_byte(self.bytes, index) == Some(b'=');
+                    pending_parameter_list = byte == b'?' || byte == b'>' && !pending_arrow_body;
                     index += 1;
                     can_start_expression = !matches!(byte, b']');
                     can_start_jsx = can_start_expression || matches!(byte, b';');
