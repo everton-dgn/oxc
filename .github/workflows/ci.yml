@@ -97,6 +97,9 @@ jobs:
           # tarballs, so it is the only lane that would have caught 0.1.0
           # shipping every native package without parser.node.
           pnpm run test:parser-api
+          # The @tsrx/core drop-in contract Markless consumes: the compat
+          # facade over the parser addon built above, and its type surface.
+          pnpm run test:markless-dropin
 
   product-floor:
     name: Product floor / Node ${{ matrix.node }} / Rust 1.96.0

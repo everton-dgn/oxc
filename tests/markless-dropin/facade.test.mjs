@@ -194,7 +194,9 @@ test("the successful no-comment path adds source locations without materializing
   });
 });
 
-test("TSRX compatibility restores element metadata and significant JSX whitespace", () => {
+// @tsrx/core 0.5.2 keeps every character between the tags as JSX text, whitespace-only runs and
+// line-break edges included (#118), so the facade passes the parser's children through as they are.
+test("TSRX compatibility restores element metadata and keeps JSX text as @tsrx/core does", () => {
   const source = "<main>\n  <span></span>\n  hello<br/>\n  world\n</main>";
   const mainClose = source.indexOf("</main>");
   const spanStart = source.indexOf("<span>");
@@ -316,8 +318,12 @@ test("TSRX compatibility restores element metadata and significant JSX whitespac
   api.parseModule(source, "src/View.tsrx");
 
   const main = program.body[0];
-  const [span, afterSpan, br, afterBr] = main.children;
-  assert.equal(main.children.length, 4);
+  const [beforeSpan, span, afterSpan, br, afterBr] = main.children;
+  assert.equal(main.children.length, 5);
+  assert.deepEqual(
+    { type: beforeSpan.type, value: beforeSpan.value, raw: beforeSpan.raw },
+    { type: "JSXText", value: "\n  ", raw: "\n  " },
+  );
   assert.deepEqual(main.metadata, {
     path: [],
     native_tsrx: true,
@@ -338,7 +344,7 @@ test("TSRX compatibility restores element metadata and significant JSX whitespac
   });
   assert.deepEqual(
     { value: afterSpan.value, raw: afterSpan.raw, start: afterSpan.start },
-    { value: "hello", raw: "hello", start: spanEnd + 3 },
+    { value: "\n  hello", raw: "\n  hello", start: spanEnd },
   );
   assert.equal(afterBr.value, "\n  world\n");
 });
