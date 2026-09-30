@@ -234,10 +234,7 @@ impl Scanner<'_> {
                 });
             }
             let span = ByteSpan::new(to_u32(value_start)?, to_u32(value_end)?);
-            if matches!(kind, ClauseRole::For)
-                && (self.identifier_start_width(value_start).is_none()
-                    || self.skip_identifier(value_start) != value_end)
-            {
+            if matches!(kind, ClauseRole::For) && !self.is_index_name(value_start, value_end)? {
                 return Err(ProjectionError::MalformedSyntax {
                     offset: to_u32(value_start)?,
                     expected: "an identifier after `index`",
@@ -264,6 +261,28 @@ impl Scanner<'_> {
             }
         }
         Ok(for_header)
+    }
+
+    /// Whether an `index` value is one identifier, which @tsrx/core reads as an expression, so
+    /// the name may sit inside balanced parentheses and beside comments: `index (i)`,
+    /// `index /* n */ i`.
+    fn is_index_name(&self, start: usize, end: usize) -> Result<bool, ProjectionError> {
+        let mut index = self.skip_trivia(start)?;
+        let mut open = 0_usize;
+        while index < end && self.bytes[index] == b'(' {
+            open += 1;
+            index = self.skip_trivia(index + 1)?;
+        }
+        if index >= end || self.identifier_start_width(index).is_none() {
+            return Ok(false);
+        }
+        index = self.skip_trivia(self.skip_identifier(index))?;
+        let mut close = 0_usize;
+        while index < end && self.bytes[index] == b')' {
+            close += 1;
+            index = self.skip_trivia(index + 1)?;
+        }
+        Ok(index >= end && open == close)
     }
 
     fn top_level_separators(

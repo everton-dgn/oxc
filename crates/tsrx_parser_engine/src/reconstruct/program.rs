@@ -79,6 +79,7 @@ pub(crate) fn reconstruct_projected(
     let mut body_lists = reconstructor.body_lists;
     {
         let mut loops = LoopReconstructor {
+            authored,
             overlay,
             segments,
             prefix,

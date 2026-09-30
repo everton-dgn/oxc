@@ -582,7 +582,7 @@ impl<'a> Builder<'a> {
         let header = clause.for_header;
         if !header.index.is_empty() {
             self.output.push_str("\nlet ");
-            self.copy_original(header.index)?;
+            self.copy_original(index_name(self.source.as_bytes(), header.index)?)?;
             self.output.push_str(" = 0;\n");
         }
         if !header.key.is_empty() {
@@ -1048,6 +1048,38 @@ fn text_gt_stand_in(
     ('\u{E000}'..='\u{F8FF}')
         .find(|candidate| !source.contains(*candidate))
         .ok_or(ProjectionError::MarkerSpaceExhausted)
+}
+
+/// The name inside an `index` value. The scanner has already checked that the value is one
+/// identifier inside balanced parentheses, whitespace, and comments (`index (i)`), and the type
+/// lane declares it with `let`, which takes the bare name only.
+fn index_name(source: &[u8], index: ByteSpan) -> Result<ByteSpan, ProjectionError> {
+    let end = index.end as usize;
+    let mut start = index.start as usize;
+    while start < end {
+        match source[start] {
+            b'(' => start += 1,
+            byte if byte.is_ascii_whitespace() => start += 1,
+            b'/' if source.get(start + 1) == Some(&b'*') => {
+                start = source[start + 2..end]
+                    .windows(2)
+                    .position(|pair| pair == b"*/")
+                    .map_or(end, |close| start + close + 4);
+            }
+            b'/' if source.get(start + 1) == Some(&b'/') => {
+                start = source[start..end]
+                    .iter()
+                    .position(|byte| matches!(byte, b'\n' | b'\r'))
+                    .map_or(end, |line| start + line);
+            }
+            _ => break,
+        }
+    }
+    let name_end = source[start..end]
+        .iter()
+        .position(|byte| byte.is_ascii_whitespace() || matches!(byte, b'/' | b')'))
+        .map_or(end, |length| start + length);
+    Ok(ByteSpan::new(to_u32(start)?, to_u32(name_end)?))
 }
 
 fn build_wrapper_actions(
