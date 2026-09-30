@@ -287,16 +287,6 @@ impl Scanner<'_> {
         None
     }
 
-    /// True when the `(` at `open` can open a parameter list: a name or keyword sits before it,
-    /// as in `App(`, `render(`, or `function (`, the `]` of a computed method name, as in
-    /// `[key](`, or the `>` that closes a type parameter list, as in `App<T>(`.
-    pub(super) fn opens_parameter_list(&self, open: usize) -> bool {
-        let end = trim_ascii_end(self.bytes, 0, open);
-        identifier_continue_before(self.bytes, end)
-            || end >= 1 && self.bytes[end - 1] == b']'
-            || end >= 2 && self.bytes[end - 1] == b'>' && self.bytes[end - 2] != b'='
-    }
-
     /// The offset of a template body `@{` that directly follows the return type annotation
     /// whose `:` is at `colon`, as in `(): Element<'div'> @{`. The scanner reads a type's `<` and
     /// `>` as operators, so without this a type that ends in type arguments would leave it
@@ -342,6 +332,15 @@ impl Scanner<'_> {
                     }
                     _ if self.identifier_start_width(index).is_some() => {
                         let end = self.skip_identifier(index);
+                        // An import type, `import("module")`, reads its argument here.
+                        if &self.bytes[index..end] == b"import"
+                            && let Ok(open) = self.skip_trivia(end)
+                            && self.bytes.get(open) == Some(&b'(')
+                        {
+                            index = self.bracket_group_end(open)?;
+                            expect_operand = false;
+                            continue;
+                        }
                         expect_operand = matches!(
                             &self.bytes[index..end],
                             b"keyof"

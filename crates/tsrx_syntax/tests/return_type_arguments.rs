@@ -56,6 +56,17 @@ fn a_template_body_after_type_arguments_is_the_function_body() {
         "class V {\n\t[k](): Foo<X> @{ <div /> }\n}",
         "class V {\n\tget x(): Foo<X> @{ <div /> }\n}",
         "const o = { async *gen(): Foo<X> @{ <div /> } };",
+        "class V {\n\t#r(): Foo<X> @{ <div /> }\n}",
+        // Optional, quoted, and numeric method names, comments before the parameter list, and
+        // import types (Bugbot on tsrx-org/oxc#162).
+        "class V {\n\trender?(): Foo<X> @{ <div /> }\n}",
+        "const o = {\n\t'render'(): Foo<X> @{ <div /> }\n};",
+        "const o = {\n\t\"a-b\"(): Foo<X> @{ <div /> }\n};",
+        "const o = {\n\t0(): Foo<X> @{ <div /> }\n};",
+        "function App /* c */ (): Foo<X> @{ <div /> }",
+        "function App // c\n(): Foo<X> @{ <div /> }",
+        "function App(): import(\"./m\").Foo<X> @{ <div /> }",
+        "function App(): typeof import(\"./m\")<X> @{ <div /> }",
     ] {
         assert_eq!(bodies(source), [(StructuralKind::FunctionBody, false)], "{source}");
     }
