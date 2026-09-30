@@ -714,7 +714,7 @@ test("parseModule preserves an explicit filename and appends compatible comments
   ]);
 });
 
-test("strict parsing throws the first returned diagnostic as a SyntaxError-like CompileError", () => {
+test("strict parsing throws the first returned diagnostic as acorn's SyntaxError, as @tsrx/core 0.5.2 does", () => {
   const api = createTsrxCoreCompat({
     parseSync() {
       return { program: makeProgram(), comments: [], errors: [makeNativeError()] };
@@ -725,17 +725,12 @@ test("strict parsing throws the first returned diagnostic as a SyntaxError-like 
     () => api.parseModule("const value = ;", "src/Broken.tsrx"),
     (error) => {
       assert.equal(error.name, "SyntaxError");
-      assert.equal(error.message, "Unexpected token");
+      assert.equal(error.message, "Unexpected token (1:13)");
       assert.equal(error.code, "TS1012");
       assert.equal(error.pos, 13);
       assert.equal(error.raisedAt, 14);
-      assert.equal(error.end, 14);
-      assert.equal(error.fileName, "src/Broken.tsrx");
-      assert.equal(error.type, "fatal");
-      assert.deepEqual(error.loc, {
-        start: { line: 1, column: 13 },
-        end: { line: 1, column: 14 },
-      });
+      assert.deepEqual(error.loc, { line: 1, column: 13 });
+      for (const key of ["end", "fileName", "type"]) assert.equal(Object.hasOwn(error, key), false);
       return true;
     },
   );
@@ -766,10 +761,7 @@ test("a stray greater-than diagnostic anchors on the extra token like @tsrx/core
     (error) => {
       assert.equal(error.pos, extraGreaterThan);
       assert.equal(error.raisedAt, extraGreaterThan + 1);
-      assert.deepEqual(error.loc, {
-        start: { line: 1, column: extraGreaterThan },
-        end: { line: 1, column: extraGreaterThan + 1 },
-      });
+      assert.deepEqual(error.loc, { line: 1, column: extraGreaterThan });
       return true;
     },
   );
@@ -788,8 +780,9 @@ test("dynamic-tag reports carry @tsrx/core 0.5's message and code without failin
 
   assert.throws(
     () => api.parseModule(source, "DynamicTagCall.tsrx"),
+    // Core reports this one with its own `error()`: a plain `Error`, not acorn's `SyntaxError`.
     (error) =>
-      error instanceof SyntaxError &&
+      error.constructor === Error &&
       error.message === message &&
       error.code === "TSRX2014" &&
       error.type === "fatal",
@@ -869,7 +862,7 @@ test("a missing native program is never exposed as a successful parse", () => {
 
   assert.throws(
     () => api.parseModule("const value = ;", "src/Broken.tsrx", { collect: true, errors }),
-    (error) => error instanceof SyntaxError && error.type === "fatal",
+    (error) => error instanceof SyntaxError && error.message === "Unexpected token (1:13)",
   );
   assert.equal(errors.length, 1);
   assert.equal(errors[0].type, "usage");

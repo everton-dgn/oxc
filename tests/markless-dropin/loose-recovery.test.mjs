@@ -16,13 +16,14 @@ function exportedFunction(program, name = "App") {
 }
 
 test("generated JavaScript preserves @tsrx/core's undefined-export early error", () => {
+  // Core raises it through acorn, with the position after the message.
   assert.throws(
     () => api.parseModule("export { missing };", "generated.js"),
     (error) =>
       error instanceof SyntaxError &&
-      error.message === "Export 'missing' is not defined" &&
-      error.fileName === "generated.js" &&
-      error.type === "fatal",
+      error.message === "Export 'missing' is not defined (1:9)" &&
+      error.code === "TS2304" &&
+      error.pos === 9,
   );
 });
 
@@ -106,19 +107,25 @@ test("loose parsing throws on a run of incomplete constructs, as strict parsing 
 	const expression = value + @;
 }
 @`;
+  // Core throws acorn's error at the token after the first bare `@` (tsrx-org/oxc#175).
   let strict;
   assert.throws(
     () => api.parseModule(source, "constructs.tsrx"),
     (error) => {
       strict = error;
-      return error instanceof SyntaxError && error.type === "fatal";
+      return (
+        error instanceof SyntaxError &&
+        error.message === "Unexpected token (3:1)" &&
+        error.code === "TS1012" &&
+        error.pos === 46
+      );
     },
   );
   assert.throws(
     () => api.parseModule(source, "constructs.tsrx", { loose: true, errors: [] }),
     (error) =>
       error instanceof SyntaxError &&
-      error.type === "fatal" &&
+      error.message === strict.message &&
       error.code === strict.code &&
       error.pos === strict.pos,
   );
