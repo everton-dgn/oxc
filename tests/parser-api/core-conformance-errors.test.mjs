@@ -147,15 +147,24 @@ test("#142: a shorthand attribute with no `}` is TS1005, and a decorator in a cl
     "class A { @dec }",
     "class A extends B<{ x: 1 }> { @dec }",
     "class A implements I<{ x: 1 }> { @dec }",
+    "class A extends (a > b ? X : Y) { @dec }",
   ]) {
     assert.notEqual(thrown(source).code, "TS1206", source);
   }
-  // A method body is no class body.
-  const method = thrown("class A { m() { @x } }");
-  assert.deepEqual(
-    [method.code, method.message, method.pos],
-    ["TS1206", "Leading decorators must be attached to a class declaration. (1:19)", 19],
-  );
+  // A method body, a block after a class, and a block after a `"class"` string are no class body.
+  for (const [source, pos] of [
+    ["class A { m() { @x } }", 19],
+    ["class A {} function f() { @x }", 29],
+    ["class A { m() {} } function f() { @x }", 37],
+    ['const c = "class"; function f() { @x }', 37],
+  ]) {
+    const error = thrown(source);
+    assert.deepEqual(
+      [error.code, error.message, error.pos],
+      ["TS1206", `Leading decorators must be attached to a class declaration. (1:${pos})`, pos],
+      source,
+    );
+  }
 });
 
 test("#142: a comment between the mistake and the token core stops at changes nothing", () => {

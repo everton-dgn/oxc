@@ -329,6 +329,7 @@ const RESERVED_WORD = /^Identifier expected\. '([^']+)' is a reserved word that 
 const STRICT_RESERVED_WORDS = new Set("implements interface let package private protected public static yield".split(" "));
 const RENDER_BEFORE_STATEMENT = "render expression precedes another statement";
 const STATEMENT_AFTER_OUTPUT = "Code must be at the top of '@{ }'; statements cannot follow the rendered output.";
+const CLASS_HEAD = /^\s*(?:[A-Za-z_$][\w$]*)?\s*(?:<[\s\S]*>)?\s*(?:(?:extends|implements)\b[\s\S]*)?$/u;
 const SHORTHAND_BRACE_EXPECTED = /^malformed TSRX at byte \d+: expected `\}` after a shorthand attribute's name$/u;
 const UNTERMINATED_ELEMENT = /^unterminated JSX element starting at byte \d+$/u;
 const MALFORMED_UNEXPECTED_TOKEN = /^malformed TSRX at byte \d+: expected (?:an `@case`, `@default`, or closing `\}`|`:` after an `@case` expression|an annotation value|a shorthand attribute's name or a spread `\.\.\.`|a JSX attribute, `>`, or `\/>`|an operator or the end of the expression after a control-flow expression)$/u;
@@ -401,16 +402,22 @@ function decoratorBefore(source, offset) {
 }
 function isClassBody(source, open) {
 	const head = source.slice(0, open);
-	const keyword = [...head.matchAll(/\bclass\b/gu)].at(-1);
+	const keyword = [...head.matchAll(/(?<![\w$.\-"'`=])class(?=[\s{])/gu)].at(-1);
 	if (keyword === void 0) return false;
-	let depth = 0;
-	for (const character of head.slice(keyword.index + 5)) {
-		if ("{([<".includes(character)) depth += 1;
-		else if ("})]>".includes(character)) depth -= 1;
-		else if (character === ";" && depth === 0) return false;
-		if (depth < 0) return false;
+	const start = keyword.index + 5;
+	if (!CLASS_HEAD.test(head.slice(start))) return false;
+	let parens = 0;
+	let angles = 0;
+	for (let index = start; index < open; index += 1) {
+		const character = source[index];
+		if (character === "(" || character === "[") parens += 1;
+		else if (character === ")" || character === "]") parens -= 1;
+		else if (parens === 0 && character === "<") angles += 1;
+		else if (parens === 0 && character === ">" && source[index - 1] !== "=") angles -= 1;
+		else if (parens === 0 && angles === 0 && "{};".includes(character)) return false;
+		if (parens < 0 || angles < 0) return false;
 	}
-	return depth === 0;
+	return parens === 0 && angles === 0;
 }
 function bareAtBefore(source, limit) {
 	for (const at of bareAtOffsets(source)) {

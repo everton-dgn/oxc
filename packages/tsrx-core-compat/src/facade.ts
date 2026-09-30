@@ -506,6 +506,8 @@ const STRICT_RESERVED_WORDS = new Set(
 const RENDER_BEFORE_STATEMENT = "render expression precedes another statement";
 const STATEMENT_AFTER_OUTPUT =
   "Code must be at the top of '@{ }'; statements cannot follow the rendered output.";
+// What may come between `class` and its body.
+const CLASS_HEAD = /^\s*(?:[A-Za-z_$][\w$]*)?\s*(?:<[\s\S]*>)?\s*(?:(?:extends|implements)\b[\s\S]*)?$/u;
 const SHORTHAND_BRACE_EXPECTED =
   /^malformed TSRX at byte \d+: expected `\}` after a shorthand attribute's name$/u;
 const UNTERMINATED_ELEMENT = /^unterminated JSX element starting at byte \d+$/u;
@@ -593,20 +595,27 @@ function decoratorBefore(source, offset) {
   return true;
 }
 
-// Whether the `{` at `open` opens a class body: a `class` keyword before it, with only a name, type
-// parameters, and heritage between them (balanced brackets and no `;`).
+// Whether the `{` at `open` opens a class body: the last `class` keyword before it, followed by a
+// class head (a name, type parameters, and heritage) whose first `{` outside brackets is `open`.
 function isClassBody(source, open) {
   const head = source.slice(0, open);
-  const keyword = [...head.matchAll(/\bclass\b/gu)].at(-1);
+  const keyword = [...head.matchAll(/(?<![\w$.\-"'`=])class(?=[\s{])/gu)].at(-1);
   if (keyword === undefined) return false;
-  let depth = 0;
-  for (const character of head.slice(keyword.index + "class".length)) {
-    if ("{([<".includes(character)) depth += 1;
-    else if ("})]>".includes(character)) depth -= 1;
-    else if (character === ";" && depth === 0) return false;
-    if (depth < 0) return false;
+  const start = keyword.index + "class".length;
+  if (!CLASS_HEAD.test(head.slice(start))) return false;
+  // Angle brackets count only outside parentheses, where a `>` can be a comparison.
+  let parens = 0;
+  let angles = 0;
+  for (let index = start; index < open; index += 1) {
+    const character = source[index];
+    if (character === "(" || character === "[") parens += 1;
+    else if (character === ")" || character === "]") parens -= 1;
+    else if (parens === 0 && character === "<") angles += 1;
+    else if (parens === 0 && character === ">" && source[index - 1] !== "=") angles -= 1;
+    else if (parens === 0 && angles === 0 && "{};".includes(character)) return false;
+    if (parens < 0 || angles < 0) return false;
   }
-  return depth === 0;
+  return parens === 0 && angles === 0;
 }
 
 // The token core stops at for the first bare `@` (an `@` with no name or `{` after it) that opens
