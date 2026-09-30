@@ -183,11 +183,15 @@ fn repair_program_value<W: Utf16WorkObserver>(
         }
         SourceValueKind::TemplateElement => {
             let value_object = required_object_field(tape, value.object, "value")?;
-            replace_json_field(
+            // The raw text is patched, not read back from the span: a TypeScript-shaped span
+            // takes in the template's delimiters (the backtick, `${` and `}`), and the raw value
+            // has each CRLF and CR as LF. Neither delimiters nor line breaks produce a marker.
+            patch_json_field(
                 tape,
                 value_object,
                 "raw",
-                authored,
+                &literal_pua_markers(authored),
+                false,
                 RepairCopyLane::ProgramRaw,
                 observer,
             )?;
