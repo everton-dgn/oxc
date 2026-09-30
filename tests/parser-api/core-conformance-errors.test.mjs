@@ -142,9 +142,35 @@ test("#142: a shorthand attribute with no `}` is TS1005, and a decorator in a cl
     [shorthand.constructor, shorthand.code, shorthand.message, shorthand.pos],
     [SyntaxError, "TS1005", "'}' expected. (2:8)", 48],
   );
-  // Core reports this one as TS1146 at 16; it is no leading decorator.
-  const member = thrown("class A { @dec }");
-  assert.notEqual(member.code, "TS1206");
+  // Core reports these as TS1146; they are no leading decorator, whatever the class's heritage.
+  for (const source of [
+    "class A { @dec }",
+    "class A extends B<{ x: 1 }> { @dec }",
+    "class A implements I<{ x: 1 }> { @dec }",
+  ]) {
+    assert.notEqual(thrown(source).code, "TS1206", source);
+  }
+  // A method body is no class body.
+  const method = thrown("class A { m() { @x } }");
+  assert.deepEqual(
+    [method.code, method.message, method.pos],
+    ["TS1206", "Leading decorators must be attached to a class declaration. (1:19)", 19],
+  );
+});
+
+test("#142: a comment between the mistake and the token core stops at changes nothing", () => {
+  // [body, code, message, pos]
+  const cases = [
+    ["@if /* c */", "TS1359", "Unexpected keyword 'if' (2:2)", 42],
+    ["@if // c", "TS1359", "Unexpected keyword 'if' (2:2)", 42],
+    ["@x /* c */", "TS1206", "Leading decorators must be attached to a class declaration. (3:0)", 52],
+    ["@x // c", "TS1206", "Leading decorators must be attached to a class declaration. (3:0)", 49],
+    ["@if (a) /* c */ x", "TSRX1008", "Expected `{` after JSX control-flow directive. (2:17)", 57],
+  ];
+  for (const [body, code, message, pos] of cases) {
+    const error = thrown(`export function App({ v, a, items }) @{\n\t${body}\n}`);
+    assert.deepEqual([error.code, error.message, error.pos], [code, message, pos], body);
+  }
 });
 
 test("#142: an element its template ends is unclosed at the `}` that ends the template", () => {
@@ -156,6 +182,9 @@ test("#142: an element its template ends is unclosed at the `}` that ends the te
     ["<div a='}'>", "div", 53, "(3:0)"],
     ["@if (a) { <div> }", "div", 57, "(2:17)"],
     ["@if (a) { <b> <i> }", "i", 59, "(2:19)"],
+    // A `}` in a template literal nested in an attribute's substitution ends nothing.
+    ["<div a={`${`}`}`}>", "div", 60, "(3:0)"],
+    ["<div a={`${ { b: `}` } }`}>", "div", 69, "(3:0)"],
   ];
   for (const [body, tag, pos, suffix] of cases) {
     const error = thrown(`export function App({ v, a, items }) @{\n\t${body}\n}`);

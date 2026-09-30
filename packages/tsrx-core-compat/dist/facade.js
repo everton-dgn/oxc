@@ -332,10 +332,26 @@ const STATEMENT_AFTER_OUTPUT = "Code must be at the top of '@{ }'; statements ca
 const SHORTHAND_BRACE_EXPECTED = /^malformed TSRX at byte \d+: expected `\}` after a shorthand attribute's name$/u;
 const UNTERMINATED_ELEMENT = /^unterminated JSX element starting at byte \d+$/u;
 const MALFORMED_UNEXPECTED_TOKEN = /^malformed TSRX at byte \d+: expected (?:an `@case`, `@default`, or closing `\}`|`:` after an `@case` expression|an annotation value|a shorthand attribute's name or a spread `\.\.\.`|a JSX attribute, `>`, or `\/>`|an operator or the end of the expression after a control-flow expression)$/u;
+function skipTriviaBefore(source, offset) {
+	let index = offset;
+	for (;;) {
+		const before = index;
+		let lineStart = index;
+		while (lineStart > 0 && !/[\n\r\u2028\u2029]/u.test(source[lineStart - 1])) lineStart -= 1;
+		const lineComment = source.indexOf("//", lineStart);
+		if (lineComment !== -1 && lineComment < index) index = lineComment;
+		while (index > 0 && WHITESPACE.test(source[index - 1])) index -= 1;
+		if (source[index - 1] === "/" && source[index - 2] === "*") {
+			const open = source.lastIndexOf("/*", index - 3);
+			if (open !== -1) index = open;
+		}
+		if (index === before) return index;
+	}
+}
 function directiveBefore(source, offset) {
 	let index = offset;
 	const skipSpace = () => {
-		while (index > 0 && WHITESPACE.test(source[index - 1])) index -= 1;
+		index = skipTriviaBefore(source, index);
 	};
 	skipSpace();
 	if (source[index - 1] === ")") {
@@ -360,8 +376,7 @@ function directiveBefore(source, offset) {
 	};
 }
 function decoratorBefore(source, offset) {
-	let index = offset;
-	while (index > 0 && WHITESPACE.test(source[index - 1])) index -= 1;
+	let index = skipTriviaBefore(source, offset);
 	if (source[index - 1] === ")") {
 		let depth = 0;
 		let cursor = index - 1;
@@ -379,8 +394,21 @@ function decoratorBefore(source, offset) {
 	if (before >= 0 && !/[\s{};]/u.test(source[before])) return false;
 	let depth = 0;
 	for (let cursor = before; cursor >= 0; cursor -= 1) if (source[cursor] === "}") depth += 1;
-	else if (source[cursor] === "{" && depth-- === 0) return !/\bclass\b[^{};]*$/u.test(source.slice(0, cursor));
+	else if (source[cursor] === "{" && depth-- === 0) return !isClassBody(source, cursor);
 	return true;
+}
+function isClassBody(source, open) {
+	const head = source.slice(0, open);
+	const keyword = [...head.matchAll(/\bclass\b/gu)].at(-1);
+	if (keyword === void 0) return false;
+	let depth = 0;
+	for (const character of head.slice(keyword.index + 5)) {
+		if ("{([<".includes(character)) depth += 1;
+		else if ("})]>".includes(character)) depth -= 1;
+		else if (character === ";" && depth === 0) return false;
+		if (depth < 0) return false;
+	}
+	return depth === 0;
 }
 function tokenEndAfter(source, offset) {
 	let index = offset;
@@ -388,6 +416,33 @@ function tokenEndAfter(source, offset) {
 	else if (source[index] === "/" && (source[index + 1] === "/" || source[index + 1] === "*")) index = skipComment(source, index);
 	else break;
 	return readIdentifier(source, index)?.end ?? Math.min(index + 1, source.length);
+}
+function skipTemplateLiteral(source, start) {
+	let index = start + 1;
+	while (index < source.length) {
+		const character = source[index];
+		if (character === "\\") index += 2;
+		else if (character === "`") return index + 1;
+		else if (character === "$" && source[index + 1] === "{") index = skipSubstitution(source, index + 2);
+		else index += 1;
+	}
+	return source.length;
+}
+function skipSubstitution(source, start) {
+	let depth = 0;
+	let index = start;
+	while (index < source.length) {
+		const character = source[index];
+		if (character === "\"" || character === "'") index = skipQuoted(source, index, character);
+		else if (character === "`") index = skipTemplateLiteral(source, index);
+		else if (character === "/" && (source[index + 1] === "/" || source[index + 1] === "*")) index = skipComment(source, index);
+		else {
+			if (character === "{") depth += 1;
+			else if (character === "}" && depth-- === 0) return index + 1;
+			index += 1;
+		}
+	}
+	return source.length;
 }
 function templateEnd(source, start) {
 	let depth = 0;
@@ -398,8 +453,12 @@ function templateEnd(source, start) {
 			index = skipComment(source, index) - 1;
 			continue;
 		}
-		if ((depth > 0 || inTag) && (character === "\"" || character === "'" || character === "`")) {
+		if ((depth > 0 || inTag) && (character === "\"" || character === "'")) {
 			index = skipQuoted(source, index, character) - 1;
+			continue;
+		}
+		if ((depth > 0 || inTag) && character === "`") {
+			index = skipTemplateLiteral(source, index) - 1;
 			continue;
 		}
 		if (character === "{") depth += 1;

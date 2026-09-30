@@ -515,10 +515,29 @@ const MALFORMED_UNEXPECTED_TOKEN =
 
 // The directive keyword after an `@` that ends before `offset`, give or take whitespace and a
 // `( … )` header: its name, where it starts, and whether an `@` precedes it.
+// The offset before the whitespace and comments that end right before `offset`. A `//` earlier on
+// the line is read as a comment running to `offset`.
+function skipTriviaBefore(source, offset) {
+  let index = offset;
+  for (;;) {
+    const before = index;
+    let lineStart = index;
+    while (lineStart > 0 && !/[\n\r\u2028\u2029]/u.test(source[lineStart - 1])) lineStart -= 1;
+    const lineComment = source.indexOf("//", lineStart);
+    if (lineComment !== -1 && lineComment < index) index = lineComment;
+    while (index > 0 && WHITESPACE.test(source[index - 1])) index -= 1;
+    if (source[index - 1] === "/" && source[index - 2] === "*") {
+      const open = source.lastIndexOf("/*", index - 3);
+      if (open !== -1) index = open;
+    }
+    if (index === before) return index;
+  }
+}
+
 function directiveBefore(source, offset) {
   let index = offset;
   const skipSpace = () => {
-    while (index > 0 && WHITESPACE.test(source[index - 1])) index -= 1;
+    index = skipTriviaBefore(source, index);
   };
   skipSpace();
   if (source[index - 1] === ")") {
@@ -544,8 +563,7 @@ function directiveBefore(source, offset) {
 // Whether a decorator (`@x`, `@x.y`, `@x()`) ends right before `offset`, at the start of a
 // statement, where acorn reads it as a leading decorator with no class after it.
 function decoratorBefore(source, offset) {
-  let index = offset;
-  while (index > 0 && WHITESPACE.test(source[index - 1])) index -= 1;
+  let index = skipTriviaBefore(source, offset);
   if (source[index - 1] === ")") {
     let depth = 0;
     let cursor = index - 1;
@@ -567,11 +585,25 @@ function decoratorBefore(source, offset) {
   let depth = 0;
   for (let cursor = before; cursor >= 0; cursor -= 1) {
     if (source[cursor] === "}") depth += 1;
-    else if (source[cursor] === "{" && depth-- === 0) {
-      return !/\bclass\b[^{};]*$/u.test(source.slice(0, cursor));
-    }
+    else if (source[cursor] === "{" && depth-- === 0) return !isClassBody(source, cursor);
   }
   return true;
+}
+
+// Whether the `{` at `open` opens a class body: a `class` keyword before it, with only a name, type
+// parameters, and heritage between them (balanced brackets and no `;`).
+function isClassBody(source, open) {
+  const head = source.slice(0, open);
+  const keyword = [...head.matchAll(/\bclass\b/gu)].at(-1);
+  if (keyword === undefined) return false;
+  let depth = 0;
+  for (const character of head.slice(keyword.index + "class".length)) {
+    if ("{([<".includes(character)) depth += 1;
+    else if ("})]>".includes(character)) depth -= 1;
+    else if (character === ";" && depth === 0) return false;
+    if (depth < 0) return false;
+  }
+  return depth === 0;
 }
 
 // The end of the token after `offset`, past whitespace and comments: an identifier or keyword
@@ -587,6 +619,39 @@ function tokenEndAfter(source, offset) {
   return readIdentifier(source, index)?.end ?? Math.min(index + 1, source.length);
 }
 
+// The offset after the template literal whose backtick is at `start`, past its `${ … }`
+// substitutions and any template literals nested in them.
+function skipTemplateLiteral(source, start) {
+  let index = start + 1;
+  while (index < source.length) {
+    const character = source[index];
+    if (character === "\\") index += 2;
+    else if (character === "`") return index + 1;
+    else if (character === "$" && source[index + 1] === "{") index = skipSubstitution(source, index + 2);
+    else index += 1;
+  }
+  return source.length;
+}
+
+// The offset after the `}` that closes a template substitution whose body starts at `start`.
+function skipSubstitution(source, start) {
+  let depth = 0;
+  let index = start;
+  while (index < source.length) {
+    const character = source[index];
+    if (character === '"' || character === "'") index = skipQuoted(source, index, character);
+    else if (character === "`") index = skipTemplateLiteral(source, index);
+    else if (character === "/" && (source[index + 1] === "/" || source[index + 1] === "*")) {
+      index = skipComment(source, index);
+    } else {
+      if (character === "{") depth += 1;
+      else if (character === "}" && depth-- === 0) return index + 1;
+      index += 1;
+    }
+  }
+  return source.length;
+}
+
 // The `}` that ends the template an element starting at `start` is in: the first `}` outside the
 // element's tags, expression containers, and comments. `-1` when the source ends first.
 function templateEnd(source, start) {
@@ -598,8 +663,12 @@ function templateEnd(source, start) {
       index = skipComment(source, index) - 1;
       continue;
     }
-    if ((depth > 0 || inTag) && (character === '"' || character === "'" || character === "`")) {
+    if ((depth > 0 || inTag) && (character === '"' || character === "'")) {
       index = skipQuoted(source, index, character) - 1;
+      continue;
+    }
+    if ((depth > 0 || inTag) && character === "`") {
+      index = skipTemplateLiteral(source, index) - 1;
       continue;
     }
     if (character === "{") depth += 1;
