@@ -1132,9 +1132,22 @@ function restoreSubmoduleSources(program, candidates) {
   }
 }
 
-function compatibleComment(comment, positionAt) {
+function compatibleComment(comment, positionAt, surrogateSource: string | null = null) {
+  let value = comment?.value;
+  // A comment's text keeps a lone surrogate as written (tsrx-org/oxc#139).
+  if (
+    surrogateSource !== null &&
+    typeof value === "string" &&
+    value.includes(REPLACEMENT_CHARACTER) &&
+    (comment.type === "Line" || comment.type === "Block")
+  ) {
+    const end = comment.end - (comment.type === "Block" ? 2 : 0);
+    const text = surrogateSource.slice(comment.start + 2, end);
+    if (text.length === value.length) value = text;
+  }
   return {
     ...comment,
+    value,
     loc:
       comment?.loc ?? {
         start: positionAt(comment?.start),
@@ -1470,9 +1483,152 @@ function decodeJsxReferences(value) {
   literal.value = decodeCharacterReferences(literal.raw.slice(1, -1), false);
 }
 
-function materializeCompatibilityProgram(program, source, filename, loose, positionAt) {
+// A UTF-16 surrogate without its pair. Without the `u` flag, the pattern reads code units.
+const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+const REPLACEMENT_CHARACTER = "\ufffd";
+
+// Reads the unit at `index` of authored text as literal text. A lone surrogate stands for itself
+// and a U+FFFD for a U+FFFD (null); a surrogate pair stands for neither. Returns the units read.
+function pushReplacementSource(text: string, index: number, units: Array<number | null>): number {
+  const unit = text.charCodeAt(index);
+  if (unit >= 0xd800 && unit <= 0xdbff) {
+    const next = text.charCodeAt(index + 1);
+    if (next >= 0xdc00 && next <= 0xdfff) return 2;
+    units.push(unit);
+  } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+    units.push(unit);
+  } else if (unit === 0xfffd) {
+    units.push(null);
+  }
+  return 1;
+}
+
+// Each U+FFFD that the cooked value of a JavaScript string's or template's authored text holds,
+// in order: the lone surrogate the native parser read as U+FFFD (a `.js`, `.jsx`, `.ts` or `.tsx`
+// source reaches it as UTF-8), or null for a U+FFFD that is really there, written or escaped.
+function javascriptReplacementSources(text: string): Array<number | null> | undefined {
+  const units: Array<number | null> = [];
+  let index = 0;
+  while (index < text.length) {
+    if (text.charCodeAt(index) !== 92) {
+      index += pushReplacementSource(text, index, units);
+      continue;
+    }
+    const escaped = text[index + 1];
+    if (escaped === undefined) return undefined;
+    if (escaped === "u") {
+      const braced = text[index + 2] === "{";
+      const close = braced ? text.indexOf("}", index + 3) : index + 6;
+      if (close === -1) return undefined;
+      const digits = text.slice(index + (braced ? 3 : 2), close);
+      if (/^[\da-f]+$/iu.test(digits) && Number.parseInt(digits, 16) === 0xfffd) units.push(null);
+      index = braced ? close + 1 : close;
+    } else if (escaped === "x") {
+      index += 4;
+    } else if (escaped === "\r" && text[index + 2] === "\n") {
+      index += 3;
+    } else {
+      // `\` before any other character cooks to that character, a lone surrogate included.
+      index += 1 + pushReplacementSource(text, index + 1, units);
+    }
+  }
+  return units;
+}
+
+// `value` with each U+FFFD put back as the unit `units` says it stands for, or `value` unchanged
+// when the counts differ and the U+FFFDs can't be told apart.
+function restoreReplacements(value: string, units: Array<number | null> | undefined): string {
+  if (units === undefined) return value;
+  const parts = value.split(REPLACEMENT_CHARACTER);
+  if (parts.length - 1 !== units.length) return value;
+  let restored = parts[0];
+  for (let index = 0; index < units.length; index += 1) {
+    const unit = units[index];
+    restored += (unit === null ? REPLACEMENT_CHARACTER : String.fromCharCode(unit)) + parts[index + 1];
+  }
+  return restored;
+}
+
+// The native parser reads a `.js`, `.jsx`, `.ts` or `.tsx` source as UTF-8, where each lone
+// surrogate becomes U+FFFD, one UTF-16 unit as the surrogate was, so spans stay exact. `@tsrx/core`
+// keeps the surrogate as written (tsrx-org/oxc#139), so this puts it back in a node whose text holds
+// one: `raw` from the source, and each U+FFFD in `value` that stands for a surrogate.
+function restoreLoneSurrogates(value, source, parent) {
+  const authored = (start, end) => {
+    if (!Number.isInteger(start) || !Number.isInteger(end)) return undefined;
+    const text = source.slice(start, end);
+    return LONE_SURROGATE.test(text) ? text : undefined;
+  };
+  if (value.type === "TemplateElement") {
+    const text = authored(value.start, value.end);
+    if (text === undefined || value.value == null) return;
+    // A template's raw text reads each CRLF and CR as LF, as the specification's TRV does.
+    value.value.raw = text.replace(/\r\n?/gu, "\n");
+    if (typeof value.value.cooked === "string") {
+      value.value.cooked = restoreReplacements(value.value.cooked, javascriptReplacementSources(text));
+    }
+    return;
+  }
+  if (value.type === "JSXText") {
+    if (typeof value.raw !== "string" || !value.raw.includes(REPLACEMENT_CHARACTER)) return;
+    const text = authored(value.start, value.end);
+    if (text === undefined) return;
+    value.raw = text;
+    value.value = decodeCharacterReferences(text, true);
+    return;
+  }
+  if (value.type !== "Literal" || typeof value.raw !== "string") return;
+  if (!value.raw.includes(REPLACEMENT_CHARACTER)) return;
+  const text = authored(value.start, value.end);
+  if (text === undefined) return;
+  value.raw = text;
+  if (value.regex != null) {
+    const pattern = text.slice(1, text.lastIndexOf("/"));
+    value.regex.pattern = pattern;
+    try {
+      value.value = new RegExp(pattern, value.regex.flags);
+    } catch {
+      value.value = null;
+    }
+  } else if (typeof value.value === "string") {
+    const interior = text.slice(1, -1);
+    value.value =
+      parent?.type === "JSXAttribute"
+        ? decodeCharacterReferences(interior, false)
+        : restoreReplacements(value.value, javascriptReplacementSources(interior));
+    if (parent?.type === "ExpressionStatement" && typeof parent.directive === "string") {
+      parent.directive = interior;
+    }
+  }
+}
+
+// A TypeScript-shaped tree spans each TemplateElement over the template's delimiters: the
+// backtick, and the `${` or `}` next to its text. `@tsrx/core` spans the text alone, as acorn
+// does (tsrx-org/oxc#140). The first element starts at the backtick exactly when it is widened.
+function narrowTemplateElements(value, positionAt) {
+  const quasis = value.quasis;
+  if (!Array.isArray(quasis) || quasis.length === 0 || quasis[0]?.start !== value.start) return;
+  for (const element of quasis) {
+    if (!Number.isInteger(element?.start) || !Number.isInteger(element?.end)) continue;
+    element.start += 1;
+    element.end -= element.tail ? 1 : 2;
+    if (Array.isArray(element.range)) element.range = [element.start, element.end];
+    element.loc = { start: positionAt(element.start), end: positionAt(element.end) };
+  }
+}
+
+function materializeCompatibilityProgram(
+  program,
+  source,
+  filename,
+  loose,
+  positionAt,
+  restoresLoneSurrogates = false,
+) {
   if (typeof source !== "string") return;
   const decodesJsx = source.includes("&") || source.includes("\r");
+  restoresLoneSurrogates &&= LONE_SURROGATE.test(source);
+  const surrogateRestored = new WeakSet();
   const defaultsStripped = program[TSRX_CORE_COMPAT_DEFAULTS_STRIPPED] === true;
   if (defaultsStripped) delete program[TSRX_CORE_COMPAT_DEFAULTS_STRIPPED];
   const stack = [program];
@@ -1561,6 +1717,26 @@ function materializeCompatibilityProgram(program, source, filename, loose, posit
       value.typeParameter = { type: "TSTypeParameter", name: key, constraint, start: key.start, end: constraint.end };
       delete value.key;
       delete value.constraint;
+    }
+
+    if (value.type === "TemplateLiteral" || value.type === "TSTemplateLiteralType") {
+      narrowTemplateElements(value, positionAt);
+    }
+    if (restoresLoneSurrogates && !surrogateRestored.has(value)) {
+      // A JSX attribute's string and a directive's are restored with their parent, which says
+      // how the string reads.
+      const child =
+        value.type === "JSXAttribute"
+          ? value.value
+          : value.type === "ExpressionStatement" && typeof value.directive === "string"
+            ? value.expression
+            : null;
+      if (child?.type === "Literal") {
+        restoreLoneSurrogates(child, source, value);
+        surrogateRestored.add(child);
+      } else {
+        restoreLoneSurrogates(value, source, null);
+      }
     }
 
     if (decodesJsx && (value.type === "JSXText" || value.type === "JSXAttribute")) {
@@ -2733,16 +2909,23 @@ export function createTsrxCoreCompat(parser) {
         throw missingProgramError(resolvedFilename);
       }
 
+      // The TSRX lane reads the source as UTF-16 and keeps each lone surrogate itself.
+      const ordinaryLane =
+        selectedParserOptions !== PARSER_OPTIONS && selectedParserOptions !== EAGER_PARSER_OPTIONS;
       materializeCompatibilityProgram(
         program,
         source,
         resolvedFilename,
         Boolean(options?.loose),
         positions(),
+        ordinaryLane,
       );
 
       if (wantsComments) {
-        for (const comment of comments) options.comments.push(compatibleComment(comment, positions()));
+        const restores = ordinaryLane && typeof source === "string" && LONE_SURROGATE.test(source);
+        for (const comment of comments) {
+          options.comments.push(compatibleComment(comment, positions(), restores ? source : null));
+        }
       }
       return program;
     },
