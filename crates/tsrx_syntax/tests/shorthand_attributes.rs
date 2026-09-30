@@ -26,7 +26,7 @@ fn shorthands(source: &str) -> Vec<(&str, &str)> {
 fn the_scanner_reads_a_shorthand_with_trivia_escapes_and_any_identifier_name() {
     assert_eq!(
         shorthands(
-            "const v = <a x { a } y=\"1\" {...r} {/* c */ b} {this} {c // d\n} {\\u0061}{class} />;"
+            "const v = <a x { a } y=\"1\" {...r} {/* c */ b} {this} {c // d\n} {\\u0061}{class} {a\\u0301} />;"
         ),
         [
             ("{ a }", "a"),
@@ -35,6 +35,8 @@ fn the_scanner_reads_a_shorthand_with_trivia_escapes_and_any_identifier_name() {
             ("{c // d\n}", "c"),
             ("{\\u0061}", "\\u0061"),
             ("{class}", "class"),
+            // An escaped combining mark continues a name (Bugbot on tsrx-org/oxc#158).
+            ("{a\\u0301}", "a\\u0301"),
         ]
     );
     // Plain JSX outside any template, a dynamic tag, and an element glued to its shorthand.
@@ -62,6 +64,11 @@ fn a_malformed_shorthand_fails_where_core_reports_it() {
         ("const v = <a {ab\\u00} />;", 18, "hexadecimal digits in a Unicode escape"),
         ("const v = <a {\\u{zz}} />;", 17, "hexadecimal digits in a Unicode escape"),
         ("const v = <a {ab\\u{110000}} />;", 19, "a Unicode escape no greater than 0x10FFFF"),
+        (
+            "const v = <a {a\\u{1F600}} />;",
+            15,
+            "a Unicode escape that spells an identifier character",
+        ),
     ] {
         assert_eq!(
             scan_for_parser(source).unwrap_err(),

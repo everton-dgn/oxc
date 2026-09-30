@@ -522,7 +522,7 @@ fn decode_non_ascii_utf8(bytes: &[u8], index: usize) -> Option<(char, usize)> {
 }
 
 #[inline]
-fn unicode_identifier_start(character: char) -> bool {
+pub(super) fn unicode_identifier_start(character: char) -> bool {
     character.is_alphabetic()
         || matches!(
             character,

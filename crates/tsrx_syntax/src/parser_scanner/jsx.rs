@@ -13,6 +13,7 @@ use super::Scanner;
 use super::dynamic::contains_collision_scalar;
 use super::lexical::identifier_continue_width;
 use super::lexical::unsupported_at_construct;
+use super::lexical::{is_identifier_continue, is_identifier_start, unicode_identifier_start};
 use super::surrogates::OpaqueSurrogateContext;
 
 /// What a shorthand attribute's `{` is missing when no identifier name follows it.
@@ -28,16 +29,34 @@ const IDENTIFIER_ESCAPE_HEX: &str = "hexadecimal digits in a Unicode escape";
 /// The range an escaped code point lies in (TS1198).
 const IDENTIFIER_ESCAPE_BOUNDS: &str = "a Unicode escape no greater than 0x10FFFF";
 
-/// Whether an escaped character can start an identifier (`first`) or continue one.
+/// Whether an escaped character can start an identifier (`first`) or continue one, by the rule
+/// the scanner reads a written one: an ASCII identifier byte, a Unicode identifier start
+/// (`Other_ID_Start` included), or after the start any other scalar but whitespace, control
+/// characters, and the symbol blocks no `ID_Continue` scalar is in, so combining marks continue
+/// a name. OXC, which the name reaches as written, holds a continue scalar to `ID_Continue`
+/// exactly; the refusals here only make core's usual escapes fail where core fails them.
 fn escaped_identifier_character(character: char, first: bool) -> bool {
     if character.is_ascii() {
         let byte = character as u8;
-        return byte.is_ascii_alphabetic()
-            || matches!(byte, b'_' | b'$')
-            || (!first && byte.is_ascii_digit());
+        return is_identifier_start(byte) || (!first && is_identifier_continue(byte));
     }
-    character.is_alphabetic()
-        || (!first && (character.is_alphanumeric() || matches!(character, '\u{200c}' | '\u{200d}')))
+    if unicode_identifier_start(character) {
+        return true;
+    }
+    if first || character.is_whitespace() || character.is_control() {
+        return false;
+    }
+    match u32::from(character) {
+        // General punctuation to miscellaneous symbols and arrows: only these continue a name.
+        0x2000..=0x2BFF => {
+            character.is_alphanumeric()
+                || matches!(u32::from(character), 0x200C | 0x200D | 0x203F | 0x2040 | 0x2054)
+                || (0x20D0..=0x20F0).contains(&u32::from(character))
+        }
+        // Mahjong tiles to symbols and pictographs extended-A: emoji, never a name.
+        0x1_F000..=0x1_FAFF => false,
+        _ => true,
+    }
 }
 
 impl Scanner<'_> {

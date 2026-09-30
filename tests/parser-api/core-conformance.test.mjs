@@ -1382,3 +1382,26 @@ test("#148: a shorthand name with escapes is read, and a bad or keyword escape f
     }
   }
 });
+
+test("#148: an escaped combining mark or ID scalar continues a shorthand name, and a symbol fails", () => {
+  // Bugbot on tsrx-org/oxc#158: an escaped continue character is any ID_Continue scalar, not
+  // only a letter or digit, and an escaped Other_ID_Start scalar starts a name.
+  for (const filename of everyJsxFile) {
+    assert.deepEqual(
+      shorthandAttributes(parseModule("const v = <a {a\\u0301} {\\u212E} {a\\u203F} />;", filename)),
+      [
+        [13, 22, "á", 14, 21, true, "JSXExpressionContainer", 13, 22, "Identifier", "á", 14, 21],
+        [23, 31, "℮", 24, 30, true, "JSXExpressionContainer", 23, 31, "Identifier", "℮", 24, 30],
+        [32, 41, "a‿", 33, 40, true, "JSXExpressionContainer", 32, 41, "Identifier", "a‿", 33, 40],
+      ],
+      filename,
+    );
+    for (const source of ["const v = <a {a\\u{1F600}} />;", "const v = <a {a\\u2192} />;"]) {
+      assert.throws(
+        () => parseModule(source, filename),
+        (error) => error.code === "TS1127" && error.pos === 15,
+        `${source} in ${filename}`,
+      );
+    }
+  }
+});
