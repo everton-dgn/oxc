@@ -594,6 +594,54 @@ fn mixed_line_endings_empty_nodes_and_eof_map_exactly() {
     assert_eq!(span(tape, empty_expression), (41, 41));
 }
 
+// tsrx-org/oxc#140: a TypeScript-shaped TemplateElement spans the template's delimiters, and its
+// raw text holds neither those delimiters nor a CR, with or without a lone surrogate in it.
+#[test]
+fn template_raw_with_lone_surrogates_excludes_delimiters_and_normalizes_line_breaks() {
+    for (unit, escape) in [(HIGH, "d800"), (LOW, "dc00")] {
+        let source = substitute_unit("const t=`a<U>${x}\r\nb<U>${`n<U>`}c`;", unit);
+        for include_ts_fields in [false, true] {
+            let result = parse_tsrx_utf16_with_options(
+                &TsrxUtf16ParseRequest { source: &source },
+                TsrxParseOptions { include_ts_fields, ..TsrxParseOptions::default() },
+            )
+            .expect("lossless UTF-16 parse result");
+            assert_eq!(result.status, ParseCompleteness::Complete);
+            let tape = result.program();
+            let mut elements = all_objects(tape)
+                .into_iter()
+                .filter(|&object| {
+                    tape.field_index(object, "type")
+                        .and_then(|field| tape.field_value(field))
+                        .and_then(|value| tape.scalar(value))
+                        == Some(r#""TemplateElement""#)
+                })
+                .map(|object| {
+                    let value = object_field(tape, object, "value");
+                    (
+                        span(tape, object).0,
+                        scalar_field(tape, value, "raw").to_owned(),
+                        scalar_field(tape, value, "cooked").to_owned(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            elements.sort();
+            let quoted = |text: &str| format!(r#""{text}""#);
+            let texts =
+                elements.into_iter().map(|(_, raw, cooked)| (raw, cooked)).collect::<Vec<_>>();
+            let expected = [
+                format!(r"a\u{escape}"),
+                // A repaired value spells its line feed as a JSON `\u000a` escape.
+                format!(r"\u000ab\u{escape}"),
+                format!(r"n\u{escape}"),
+                "c".to_owned(),
+            ]
+            .map(|text| (quoted(&text), quoted(&text)));
+            assert_eq!(texts, expected, "include_ts_fields: {include_ts_fields}");
+        }
+    }
+}
+
 #[test]
 fn backslash_adjacent_surrogates_preserve_cooked_and_raw_semantics() {
     for (unit, escape) in [(HIGH, "d800"), (LOW, "dc00")] {
