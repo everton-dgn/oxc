@@ -312,6 +312,13 @@ jobs:
               --title "site: pin wasm demo engine ${short}" \
               --body "Pins the demo engine built from ${GITHUB_SHA} (release ${TAG}) for oxc.tsrx.dev. Until this merges the site keeps serving the previously pinned engine, which stays available because engine releases are immutable. Opened by site-artifact.yml; needs one approving review."
           fi
+          # Only the newest pin should merge: an older one pins an engine main has
+          # moved past. So every other open pin pull request is closed as superseded.
+          gh pr list --state open --json number,headRefName \
+            --jq ".[] | select(.headRefName | startswith(\"site/wasm-pin-\")) | select(.headRefName != \"${branch}\") | .number" |
+            while read -r stale; do
+              gh pr close "${stale}" --delete-branch --comment "Superseded by the pin of the engine built from ${GITHUB_SHA} on ${branch}."
+            done
           echo "::notice::pin pull request open on ${branch}; oxc.tsrx.dev serves the previous engine until it merges"
 
 
