@@ -8,7 +8,7 @@ use support::{
     assert_empty_path, assert_no_scaffold, field, list_field, object_field, one_object,
     optional_field, program_body, require_type, scalar_field, span,
 };
-use tsrx_parser_engine::{TsrxParseRequest, parse_tsrx};
+use tsrx_parser_engine::{TsrxParseOptions, TsrxParseRequest, parse_tsrx, parse_tsrx_with_options};
 use tsrx_tape_schema::{FlatTape, RecordIndex};
 
 fn assert_for_head(
@@ -273,4 +273,84 @@ fn preserves_projection_header_ordinals_for_nested_annotated_loops() {
     require_type(tape, key, "MemberExpression");
     assert_eq!(scalar_field(tape, object_field(tape, key, "property"), "name"), r#""id""#);
     assert_no_scaffold(tape);
+}
+
+fn annotated_loop(tape: &FlatTape) -> RecordIndex {
+    let function = one_object(&program_body(tape));
+    let code_block = object_field(tape, function, "body");
+    let render = object_field(tape, code_block, "render");
+    let loop_node = one_object(&list_field(tape, render, "children"));
+    require_type(tape, loop_node, "JSXForExpression");
+    loop_node
+}
+
+fn header_value<'a>(
+    tape: &'a FlatTape,
+    loop_node: RecordIndex,
+    name: &str,
+) -> (&'a str, (u32, u32)) {
+    let value = object_field(tape, loop_node, name);
+    (scalar_field(tape, value, "type"), span(tape, value))
+}
+
+const PARENTHESIZED_HEADER: &str =
+    "function View() @{<main>@for(const x of (a, xs);index (i);key (x.id)){<b>{x}</b>}</main>}";
+
+#[test]
+fn keeps_a_parenthesized_iterable_index_and_key_by_default() {
+    // tsrx-org/oxc#151: with parentheses kept, each value is the ParenthesizedExpression the
+    // author wrote, from its `(` to its `)`.
+    let result = parse_tsrx(&TsrxParseRequest { source: PARENTHESIZED_HEADER })
+        .expect("parenthesized @for header");
+    let tape = result.program();
+    let loop_node = annotated_loop(tape);
+    let parenthesized = r#""ParenthesizedExpression""#;
+    assert_eq!(header_value(tape, loop_node, "right"), (parenthesized, (40, 47)));
+    assert_eq!(header_value(tape, loop_node, "index"), (parenthesized, (54, 57)));
+    assert_eq!(header_value(tape, loop_node, "key"), (parenthesized, (62, 68)));
+    assert_no_scaffold(tape);
+}
+
+#[test]
+fn reads_a_parenthesized_iterable_index_and_key_inside_their_parentheses() {
+    // tsrx-org/oxc#151: @tsrx/core drops the parentheses and spans the expression inside them.
+    let result = parse_tsrx_with_options(
+        &TsrxParseRequest { source: PARENTHESIZED_HEADER },
+        TsrxParseOptions { preserve_parens: Some(false), ..TsrxParseOptions::default() },
+    )
+    .expect("parenthesized @for header");
+    let tape = result.program();
+    let loop_node = annotated_loop(tape);
+    assert_eq!(header_value(tape, loop_node, "right"), (r#""SequenceExpression""#, (41, 46)));
+    assert_eq!(header_value(tape, loop_node, "index"), (r#""Identifier""#, (55, 56)));
+    assert_eq!(header_value(tape, loop_node, "key"), (r#""MemberExpression""#, (63, 67)));
+    assert_no_scaffold(tape);
+}
+
+#[test]
+fn reads_header_values_wrapped_in_comments_and_nested_parentheses() {
+    let source = concat!(
+        "function View() @{<main>@for(const x of /*c*/ ((xs)) /*d*/;key ( x // k\n))",
+        "{<b>{x}</b>}</main>}"
+    );
+    let result = parse_tsrx_with_options(
+        &TsrxParseRequest { source },
+        TsrxParseOptions { preserve_parens: Some(false), ..TsrxParseOptions::default() },
+    )
+    .expect("commented @for header");
+    let tape = result.program();
+    let loop_node = annotated_loop(tape);
+    assert_eq!(header_value(tape, loop_node, "right"), (r#""Identifier""#, (48, 50)));
+    assert_eq!(header_value(tape, loop_node, "key"), (r#""Identifier""#, (65, 66)));
+    assert_no_scaffold(tape);
+}
+
+#[test]
+fn rejects_an_index_that_is_not_one_parenthesized_name() {
+    for index in ["(i)(j)", "(i, j)", "((i)", "i + 1", "(i) + 1"] {
+        let source =
+            format!("function View() @{{<main>@for(const x of xs;index {index}){{x}}</main>}}");
+        let result = parse_tsrx(&TsrxParseRequest { source: &source }).expect("scanned");
+        assert_eq!(result.status, tsrx_tape_schema::ParseCompleteness::Failed, "{source}");
+    }
 }

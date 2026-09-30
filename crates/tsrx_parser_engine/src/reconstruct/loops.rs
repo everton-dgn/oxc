@@ -22,10 +22,11 @@ use super::{
     edits::{append_empty_metadata, replace_type},
     objects::find_unique_start,
     scaffold::{require_scaffold_callee, scaffold_tag_matches},
-    spans::{AuthoredStart, require_authored_object_span},
+    spans::{AuthoredStart, require_header_value_span},
 };
 
 pub(super) struct LoopReconstructor<'overlay, 'parse, 'starts> {
+    pub(super) authored: &'parse str,
     pub(super) overlay: OverlayView<'overlay>,
     pub(super) segments: &'parse [ProjectionSegment],
     pub(super) prefix: &'parse str,
@@ -246,7 +247,13 @@ impl LoopReconstructor<'_, '_, '_> {
             .filter(|ordinal| *ordinal != tsrx_syntax::NONE_INDEX)
             .and_then(|ordinal| usize::try_from(ordinal).ok())
             .ok_or(TsrxParseError::Unsupported("annotated for clause has no header ordinal"))?;
-        extract_annotated_header(tape, loop_object, self.segments, self.prefix, ordinal, header)
+        let scaffold = HeaderScaffold {
+            authored: self.authored,
+            segments: self.segments,
+            prefix: self.prefix,
+            ordinal,
+        };
+        extract_annotated_header(tape, loop_object, scaffold, header)
     }
 }
 
@@ -322,14 +329,23 @@ pub(super) fn build_header_ordinals(overlay: OverlayView<'_>) -> Result<Vec<u32>
     Ok(ordinals)
 }
 
+/// What an annotated header's `_H0_(right, _IH0_(index), _KH0_(key), _HE0_)` scaffold is read
+/// against: the authored source its values came from, and the tags that name its calls.
+#[derive(Clone, Copy)]
+struct HeaderScaffold<'parse> {
+    authored: &'parse str,
+    segments: &'parse [ProjectionSegment],
+    prefix: &'parse str,
+    ordinal: usize,
+}
+
 fn extract_annotated_header(
     tape: &mut FlatTape,
     loop_object: RecordIndex,
-    segments: &[ProjectionSegment],
-    prefix: &str,
-    ordinal: usize,
+    scaffold: HeaderScaffold<'_>,
     header: ForHeader,
 ) -> Result<(Option<ValueRef>, Option<ValueRef>), TsrxParseError> {
+    let HeaderScaffold { authored, segments, prefix, ordinal } = scaffold;
     let right_field = tape
         .field_index(loop_object, "right")
         .ok_or(TsrxParseError::Unsupported("annotated for-of has no right field"))?;
@@ -345,7 +361,7 @@ fn extract_annotated_header(
         .next()
         .and_then(ValueRef::as_object)
         .ok_or(TsrxParseError::Unsupported("annotated for right value is not an expression"))?;
-    require_authored_object_span(tape, right, segments, header.right)?;
+    require_header_value_span(tape, right, segments, authored, header.right)?;
 
     let index = if header.index.is_empty() {
         None
@@ -354,7 +370,7 @@ fn extract_annotated_header(
             .next()
             .and_then(ValueRef::as_object)
             .ok_or(TsrxParseError::Unsupported("for index wrapper missing"))?;
-        Some(extract_header_value(tape, call, segments, prefix, "IH", ordinal, header.index)?)
+        Some(extract_header_value(tape, call, scaffold, "IH", header.index)?)
     };
     let key = if header.key.is_empty() {
         None
@@ -363,7 +379,7 @@ fn extract_annotated_header(
             .next()
             .and_then(ValueRef::as_object)
             .ok_or(TsrxParseError::Unsupported("for key wrapper missing"))?;
-        Some(extract_header_value(tape, call, segments, prefix, "KH", ordinal, header.key)?)
+        Some(extract_header_value(tape, call, scaffold, "KH", header.key)?)
     };
     let end = values
         .next()
@@ -382,17 +398,16 @@ fn extract_annotated_header(
 fn extract_header_value(
     tape: &FlatTape,
     call: RecordIndex,
-    segments: &[ProjectionSegment],
-    prefix: &str,
+    scaffold: HeaderScaffold<'_>,
     tag: &str,
-    ordinal: usize,
     authored_span: tsrx_syntax::ByteSpan,
 ) -> Result<RecordIndex, TsrxParseError> {
+    let HeaderScaffold { authored, segments, prefix, ordinal } = scaffold;
     require_type(tape, call, r#""CallExpression""#)?;
     require_scaffold_callee(tape, call, prefix, tag, ordinal)?;
     let expression = exact_one_value(tape, list_field(tape, call, "arguments")?)?
         .as_object()
         .ok_or(TsrxParseError::Unsupported("header wrapper value is not an expression"))?;
-    require_authored_object_span(tape, expression, segments, authored_span)?;
+    require_header_value_span(tape, expression, segments, authored, authored_span)?;
     Ok(expression)
 }
