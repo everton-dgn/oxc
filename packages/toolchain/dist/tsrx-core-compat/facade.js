@@ -899,9 +899,16 @@ function restoreSubmoduleSources(program, candidates) {
 		}
 	}
 }
-function compatibleComment(comment, positionAt) {
+function compatibleComment(comment, positionAt, surrogateSource = null) {
+	let value = comment?.value;
+	if (surrogateSource !== null && typeof value === "string" && value.includes(REPLACEMENT_CHARACTER) && (comment.type === "Line" || comment.type === "Block")) {
+		const end = comment.end - (comment.type === "Block" ? 2 : 0);
+		const text = surrogateSource.slice(comment.start + 2, end);
+		if (text.length === value.length) value = text;
+	}
 	return {
 		...comment,
+		value,
 		loc: comment?.loc ?? {
 			start: positionAt(comment?.start),
 			end: positionAt(comment?.end)
@@ -1108,9 +1115,111 @@ function decodeJsxReferences(value) {
 	if (literal?.type !== "Literal" || typeof literal.value !== "string" || typeof literal.raw !== "string" || !literal.raw.includes("&")) return;
 	literal.value = decodeCharacterReferences(literal.raw.slice(1, -1), false);
 }
-function materializeCompatibilityProgram(program, source, filename, loose, positionAt) {
+const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+const REPLACEMENT_CHARACTER = "�";
+function pushReplacementSource(text, index, units) {
+	const unit = text.charCodeAt(index);
+	if (unit >= 55296 && unit <= 56319) {
+		const next = text.charCodeAt(index + 1);
+		if (next >= 56320 && next <= 57343) return 2;
+		units.push(unit);
+	} else if (unit >= 56320 && unit <= 57343) units.push(unit);
+	else if (unit === 65533) units.push(null);
+	return 1;
+}
+function javascriptReplacementSources(text) {
+	const units = [];
+	let index = 0;
+	while (index < text.length) {
+		if (text.charCodeAt(index) !== 92) {
+			index += pushReplacementSource(text, index, units);
+			continue;
+		}
+		const escaped = text[index + 1];
+		if (escaped === void 0) return void 0;
+		if (escaped === "u") {
+			const braced = text[index + 2] === "{";
+			const close = braced ? text.indexOf("}", index + 3) : index + 6;
+			if (close === -1) return void 0;
+			const digits = text.slice(index + (braced ? 3 : 2), close);
+			if (/^[\da-f]+$/iu.test(digits) && Number.parseInt(digits, 16) === 65533) units.push(null);
+			index = braced ? close + 1 : close;
+		} else if (escaped === "x") index += 4;
+		else if (escaped === "\r" && text[index + 2] === "\n") index += 3;
+		else index += 1 + pushReplacementSource(text, index + 1, units);
+	}
+	return units;
+}
+function restoreReplacements(value, units) {
+	if (units === void 0) return value;
+	const parts = value.split(REPLACEMENT_CHARACTER);
+	if (parts.length - 1 !== units.length) return value;
+	let restored = parts[0];
+	for (let index = 0; index < units.length; index += 1) {
+		const unit = units[index];
+		restored += (unit === null ? REPLACEMENT_CHARACTER : String.fromCharCode(unit)) + parts[index + 1];
+	}
+	return restored;
+}
+function restoreLoneSurrogates(value, source, parent) {
+	const authored = (start, end) => {
+		if (!Number.isInteger(start) || !Number.isInteger(end)) return void 0;
+		const text = source.slice(start, end);
+		return LONE_SURROGATE.test(text) ? text : void 0;
+	};
+	if (value.type === "TemplateElement") {
+		const text = authored(value.start, value.end);
+		if (text === void 0 || value.value == null) return;
+		value.value.raw = text.replace(/\r\n?/gu, "\n");
+		if (typeof value.value.cooked === "string") value.value.cooked = restoreReplacements(value.value.cooked, javascriptReplacementSources(text));
+		return;
+	}
+	if (value.type === "JSXText") {
+		if (typeof value.raw !== "string" || !value.raw.includes(REPLACEMENT_CHARACTER)) return;
+		const text = authored(value.start, value.end);
+		if (text === void 0) return;
+		value.raw = text;
+		value.value = decodeCharacterReferences(text, true);
+		return;
+	}
+	if (value.type !== "Literal" || typeof value.raw !== "string") return;
+	if (!value.raw.includes(REPLACEMENT_CHARACTER)) return;
+	const text = authored(value.start, value.end);
+	if (text === void 0) return;
+	value.raw = text;
+	if (value.regex != null) {
+		const pattern = text.slice(1, text.lastIndexOf("/"));
+		value.regex.pattern = pattern;
+		try {
+			value.value = new RegExp(pattern, value.regex.flags);
+		} catch {
+			value.value = null;
+		}
+	} else if (typeof value.value === "string") {
+		const interior = text.slice(1, -1);
+		value.value = parent?.type === "JSXAttribute" ? decodeCharacterReferences(interior, false) : restoreReplacements(value.value, javascriptReplacementSources(interior));
+		if (parent?.type === "ExpressionStatement" && typeof parent.directive === "string") parent.directive = interior;
+	}
+}
+function narrowTemplateElements(value, positionAt) {
+	const quasis = value.quasis;
+	if (!Array.isArray(quasis) || quasis.length === 0 || quasis[0]?.start !== value.start) return;
+	for (const element of quasis) {
+		if (!Number.isInteger(element?.start) || !Number.isInteger(element?.end)) continue;
+		element.start += 1;
+		element.end -= element.tail ? 1 : 2;
+		if (Array.isArray(element.range)) element.range = [element.start, element.end];
+		element.loc = {
+			start: positionAt(element.start),
+			end: positionAt(element.end)
+		};
+	}
+}
+function materializeCompatibilityProgram(program, source, filename, loose, positionAt, restoresLoneSurrogates = false) {
 	if (typeof source !== "string") return;
 	const decodesJsx = source.includes("&") || source.includes("\r");
+	restoresLoneSurrogates &&= LONE_SURROGATE.test(source);
+	const surrogateRestored = /* @__PURE__ */ new WeakSet();
 	const defaultsStripped = program[TSRX_CORE_COMPAT_DEFAULTS_STRIPPED] === true;
 	if (defaultsStripped) delete program[TSRX_CORE_COMPAT_DEFAULTS_STRIPPED];
 	const stack = [program];
@@ -1187,6 +1296,14 @@ function materializeCompatibilityProgram(program, source, filename, loose, posit
 			};
 			delete value.key;
 			delete value.constraint;
+		}
+		if (value.type === "TemplateLiteral" || value.type === "TSTemplateLiteralType") narrowTemplateElements(value, positionAt);
+		if (restoresLoneSurrogates && !surrogateRestored.has(value)) {
+			const child = value.type === "JSXAttribute" ? value.value : value.type === "ExpressionStatement" && typeof value.directive === "string" ? value.expression : null;
+			if (child?.type === "Literal") {
+				restoreLoneSurrogates(child, source, value);
+				surrogateRestored.add(child);
+			} else restoreLoneSurrogates(value, source, null);
 		}
 		if (decodesJsx && (value.type === "JSXText" || value.type === "JSXAttribute")) decodeJsxReferences(value);
 		materializeDirectiveBlockMetadata(value);
@@ -2101,8 +2218,12 @@ function createTsrxCoreCompat(parser) {
 				if (nativeErrors.length > 0) throw toCompileError(nativeErrors[0], resolvedFilename, positions(), "fatal", source);
 				throw missingProgramError(resolvedFilename);
 			}
-			materializeCompatibilityProgram(program, source, resolvedFilename, Boolean(options?.loose), positions());
-			if (wantsComments) for (const comment of comments) options.comments.push(compatibleComment(comment, positions()));
+			const ordinaryLane = selectedParserOptions !== PARSER_OPTIONS && selectedParserOptions !== EAGER_PARSER_OPTIONS;
+			materializeCompatibilityProgram(program, source, resolvedFilename, Boolean(options?.loose), positions(), ordinaryLane);
+			if (wantsComments) {
+				const restores = ordinaryLane && typeof source === "string" && LONE_SURROGATE.test(source);
+				for (const comment of comments) options.comments.push(compatibleComment(comment, positions(), restores ? source : null));
+			}
 			return program;
 		}
 	});
