@@ -7,7 +7,7 @@ use tsrx_syntax::{
     scan, scan_for_parser,
 };
 
-const TYPE_ARGUMENTS: [&str; 9] = [
+const TYPE_ARGUMENTS: [&str; 11] = [
     "const view = <main><List<string> /></main>;",
     "const view = <List<string>>a</List>;",
     "const view = <List<string> items={items} />;",
@@ -18,6 +18,9 @@ const TYPE_ARGUMENTS: [&str; 9] = [
     // Bugbot on tsrx-org/oxc#160: a `>` in a template literal type is text.
     "const view = <main><List<`a>b`> /></main>;",
     "const view = <List<`x${Array<string>}>`>>a</List>;",
+    // Bugbot on tsrx-org/oxc#160: a typed element that leads its line after a statement.
+    "export function App() @{\n\tconst x = 1\n\t<List<string> />\n}\n",
+    "export function App() @{\n\tconst x = 1\n\t<List<string>>{x}</List>\n}\n",
 ];
 
 const SIGNATURES: [&str; 7] = [

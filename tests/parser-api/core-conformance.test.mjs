@@ -1698,3 +1698,12 @@ test("#153: a `>` in a template literal type argument is text, as core reads it 
     ["List", 13, 24, [18, 23, ["TSLiteralType"]]],
   ]);
 });
+
+test("#153: a typed element that starts a line after a statement is markup, as core reads it (Bugbot on #160)", () => {
+  for (const [source, expected] of [
+    ["export function App() @{\n\tconst x = 1\n\t<List<string> />\n}", [["List", 39, 55, [44, 52, ["TSStringKeyword"]]]]],
+    ["export function App() @{\n\tconst x = 1\n\t<List<string>>{x}</List>\n}", [["List", 39, 53, [44, 52, ["TSStringKeyword"]]]]],
+  ]) {
+    assert.deepEqual(openingTypeArguments(parseModule(source, "App.tsrx")), expected, source);
+  }
+});

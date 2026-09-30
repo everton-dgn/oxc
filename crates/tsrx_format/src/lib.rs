@@ -1091,6 +1091,15 @@ mod tests {
         let second = format_text(Path::new("App.tsrx"), &first.code).unwrap();
         assert_eq!(second.code, first.code);
         assert!(!second.changed);
+
+        // Bugbot on tsrx-org/oxc#160: a typed element that leads its line after a statement
+        // without a `;` is markup, not a comparison.
+        let source = "export function App() @{\n\tconst x = 1\n\t<List<string> />\n}\n";
+        let first = format_text(Path::new("App.tsrx"), source).unwrap();
+        assert_eq!(
+            first.code,
+            "export function App() @{\n  const x = 1;\n  <List<string> />;\n}\n"
+        );
     }
 
     #[test]

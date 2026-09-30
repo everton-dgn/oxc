@@ -640,6 +640,13 @@ impl Scanner<'_> {
             return false;
         }
         index = self.skip_jsx_name(index);
+        // A tag's type arguments, `<List<string> />`, sit between its name and what commits it.
+        if self.bytes.get(index) == Some(&b'<') {
+            let Some(end) = self.type_list_end(index + 1) else {
+                return false;
+            };
+            index = end;
+        }
         self.bytes.get(index).is_some_and(|byte| {
             byte.is_ascii_whitespace()
                 || *byte == b'>'
