@@ -1686,3 +1686,13 @@ test("#152: markup that only looks like a signature is still markup, and an uncl
   assert.deepEqual(texts(ast).map(({ value }) => value), ["(note): y"]);
   assert.throws(() => parseModule("const x = <P>(p: P): void;", "App.tsrx"));
 });
+
+test("#153: a `>` in a template literal type argument is text, as core reads it (Bugbot on #160)", () => {
+  assert.deepEqual(openingTypeArguments(parseModule("const view = <main><List<`a>b`> /></main>;", "App.tsrx")), [
+    ["main", 13, 19, null],
+    ["List", 19, 34, [24, 31, ["TSLiteralType"]]],
+  ]);
+  assert.deepEqual(openingTypeArguments(parseModule("const view = <List<`>`>>a</List>;", "App.tsrx")), [
+    ["List", 13, 24, [18, 23, ["TSLiteralType"]]],
+  ]);
+});

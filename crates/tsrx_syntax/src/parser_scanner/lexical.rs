@@ -218,12 +218,14 @@ impl Scanner<'_> {
     }
 
     /// The offset after the `>` that closes a type list whose contents begin at `index`, just
-    /// past its `<`. Nested lists count, and an arrow's `=>` closes nothing.
+    /// past its `<`. Nested lists count, an arrow's `=>` closes nothing, and a `>` in a string
+    /// or template literal type is text.
     pub(super) fn type_list_end(&self, mut index: usize) -> Option<usize> {
         let mut depth = 1_u32;
         while let Some(&byte) = self.bytes.get(index) {
             match byte {
                 b'\'' | b'"' => index = self.skip_quote(index, byte).ok()?,
+                b'`' => index = self.skip_template_raw(index, self.bytes.len()).ok()?,
                 b'/' if self.bytes.get(index + 1) == Some(&b'*') => {
                     index = self.skip_block_comment(index).ok()?;
                 }
@@ -248,15 +250,14 @@ impl Scanner<'_> {
     }
 
     /// The offset after the `)` that closes the parameter list opened at `start`, counting nested
-    /// brackets of every kind and skipping strings and comments. A signature's parameters have
-    /// no initializers, so only a template literal type could hide a bracket from this count,
-    /// and a miscount only keeps the markup error the caller already has.
+    /// brackets of every kind and skipping strings, template literal types, and comments.
     fn balanced_parameters_end(&self, start: usize) -> Option<usize> {
         let mut depth = 0_u32;
         let mut index = start;
         while let Some(&byte) = self.bytes.get(index) {
             match byte {
                 b'\'' | b'"' => index = self.skip_quote(index, byte).ok()?,
+                b'`' => index = self.skip_template_raw(index, self.bytes.len()).ok()?,
                 b'/' if self.bytes.get(index + 1) == Some(&b'*') => {
                     index = self.skip_block_comment(index).ok()?;
                 }

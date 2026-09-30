@@ -7,7 +7,7 @@ use tsrx_syntax::{
     scan, scan_for_parser,
 };
 
-const TYPE_ARGUMENTS: [&str; 7] = [
+const TYPE_ARGUMENTS: [&str; 9] = [
     "const view = <main><List<string> /></main>;",
     "const view = <List<string>>a</List>;",
     "const view = <List<string> items={items} />;",
@@ -15,15 +15,19 @@ const TYPE_ARGUMENTS: [&str; 7] = [
     "const view = <main><List<() => void> /><UI.List<'a' | \"b\"> /></main>;",
     "export function App() @{\n\t<main>\n\t\t<List<string> items={items} />\n\t</main>\n}\n",
     "export function App() @{\n\t<List<string>>{item}</List>\n}\n",
+    // Bugbot on tsrx-org/oxc#160: a `>` in a template literal type is text.
+    "const view = <main><List<`a>b`> /></main>;",
+    "const view = <List<`x${Array<string>}>`>>a</List>;",
 ];
 
-const SIGNATURES: [&str; 6] = [
+const SIGNATURES: [&str; 7] = [
     "interface Trigger {\n\t<P>(props: P): void;\n}\n\ntype Props<P = unknown> = P;\n",
     "interface Trigger {\n\t<P>(props: P): void;\n}\n",
     "type Render = <P>(props: P) => void;\n",
     "interface Trigger {\n\tnew <P>(props: P): Trigger;\n}\n",
     "let render: <A, B>(a: { b: [A, B] }, c?: () => void) => void;\n",
     "interface T {\n\t<P>(props: P): void;\n}\nexport function App() @{\n\t<div>{'x'}</div>\n}\n",
+    "interface T {\n\t<P>(p: `a)${P}`): void;\n}\n",
 ];
 
 #[test]
