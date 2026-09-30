@@ -1735,3 +1735,24 @@ test("#151: a parenthesized index must still be one name, as in core", () => {
     );
   }
 });
+
+test("#151: parentheses inside a header value, not around it, stay in the value's span", () => {
+  // Bugbot on tsrx-org/oxc#163: a value that only starts or ends with a grouped operand spans
+  // from that operand's `(` or to its `)`, in core as in OXC, so no stray parenthesis is left
+  // outside it. `[type, start, end]` of the iterable and of the key are core's.
+  const cases = [
+    ["(a) + (b)", ["BinaryExpression", 33, 42], ["BinaryExpression", 44, 53]],
+    ["(a)(b)", ["CallExpression", 33, 39], ["CallExpression", 44, 50]],
+    ["(a, b)[0]", ["MemberExpression", 33, 42], ["MemberExpression", 44, 53]],
+    ["(a) ? (b) : (c)", ["ConditionalExpression", 33, 48], ["ConditionalExpression", 44, 59]],
+    ["(a).b + (c)", ["BinaryExpression", 33, 44], ["BinaryExpression", 44, 55]],
+    ["((a) , (b))", ["SequenceExpression", 34, 43], ["SequenceExpression", 45, 54]],
+  ];
+  const loopOf = (header) =>
+    findAll(parseModule(inForExpression(header), "App.tsrx"), (node) => node.type === "JSXForExpression")[0];
+  const span = (node) => [node.type, node.start, node.end];
+  for (const [value, right, key] of cases) {
+    assert.deepEqual(span(loopOf(`const item of ${value}; key item`).right), right, `of ${value}`);
+    assert.deepEqual(span(loopOf(`const item of items; key ${value}`).key), key, `key ${value}`);
+  }
+});
