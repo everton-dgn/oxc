@@ -274,10 +274,10 @@ function dynamicTagNotExpressionError(error, positionAt) {
 function isUnclosedTag(error) {
 	return typeof error?.message === "string" && UNCLOSED_TAG_MESSAGE.test(error.message);
 }
-function acornRaise(message, start, positionAt, raisedAt = start) {
+function acornRaise(message, start, positionAt, raisedAt = start, code = compatibleDiagnosticCode(null, message)) {
 	const loc = positionAt(start);
 	const raised = /* @__PURE__ */ new SyntaxError(`${message} (${loc.line}:${loc.column})`);
-	raised.code = compatibleDiagnosticCode(null, message);
+	raised.code = code;
 	raised.pos = start;
 	raised.loc = loc;
 	raised.raisedAt = raisedAt;
@@ -285,7 +285,11 @@ function acornRaise(message, start, positionAt, raisedAt = start) {
 }
 function unclosedTagFailure(error, collecting, positionAt, source) {
 	if (collecting && typeof source === "string") return acornRaise("'}' expected.", source.length, positionAt);
-	return acornRaise(error.message, primarySpan(error).start ?? 0, positionAt);
+	return unclosedTagRaise(error, positionAt);
+}
+function unclosedTagRaise(error, positionAt) {
+	const { start = 0, end } = primarySpan(error);
+	return acornRaise(error.message, start, positionAt, Math.max(end ?? start, start + 1));
 }
 function compatibleDiagnosticCode(error, message) {
 	if (typeof error?.code === "string") return error.code;
@@ -293,10 +297,226 @@ function compatibleDiagnosticCode(error, message) {
 	const oxc = OXC_CODE.exec(error?.codeframe ?? "");
 	return code ?? (oxc === null ? void 0 : `TS${oxc[1]}`);
 }
-function toCompileError(error, filename, positionAt, type, source) {
-	const translated = new SyntaxError(compatibleDiagnosticMessage(error));
+const CORE_ERROR_CODES = /* @__PURE__ */ new Set([
+	"TSRX1004",
+	"TSRX1007",
+	"TSRX2001",
+	"TSRX2011",
+	"TSRX2012",
+	"TSRX2014"
+]);
+const CORE_ERROR_MESSAGE = /^(?:Identifier|type) '[^']+' has already been declared|^Argument name clash$|^Cannot redeclare /u;
+function isCoreReportedError(diagnostic) {
+	return CORE_ERROR_CODES.has(diagnostic.code) || CORE_ERROR_MESSAGE.test(diagnostic.message);
+}
+const UNEXPECTED_TOKEN = "Unexpected token";
+const DIRECTIVE_BODY_EXPECTED = "Expected `{` after JSX control-flow directive.";
+const TRY_HANDLER_MISSING = "Missing `@catch` or `@pending` after `@try` block.";
+const LEADING_DECORATORS = "Leading decorators must be attached to a class declaration.";
+const BRANCH_DIRECTIVES = {
+	else: "if",
+	empty: "for",
+	catch: "try",
+	pending: "try"
+};
+const ACORN_KEYWORDS = new Set("break case catch continue debugger default do else finally for function if return switch throw try var while with null true false instanceof typeof void delete new in this const class extends export import super".split(" "));
+const EXPECTED_PAREN = /^malformed TSRX at byte \d+: expected `\(`$/u;
+const EXPECTED_BRACED_BODY = /^malformed TSRX at byte \d+: expected a braced control-flow body$/u;
+const EXPECTED_BRANCH = /^malformed TSRX at byte \d+: expected `@(else|empty|pending|catch)`$/u;
+const EXPECTED_TRY_HANDLER = /^malformed TSRX at byte \d+: expected an `@pending` or `@catch` clause$/u;
+const EXPECTED_OWNING_CONTROL = /^malformed TSRX at byte \d+: expected an owning TSRX control$/u;
+const RESERVED_WORD = /^Identifier expected\. '([^']+)' is a reserved word that cannot be used here\.$/u;
+const STRICT_RESERVED_WORDS = new Set("implements interface let package private protected public static yield".split(" "));
+const RENDER_BEFORE_STATEMENT = "render expression precedes another statement";
+const STATEMENT_AFTER_OUTPUT = "Code must be at the top of '@{ }'; statements cannot follow the rendered output.";
+const SHORTHAND_BRACE_EXPECTED = /^malformed TSRX at byte \d+: expected `\}` after a shorthand attribute's name$/u;
+const UNTERMINATED_ELEMENT = /^unterminated JSX element starting at byte \d+$/u;
+const MALFORMED_UNEXPECTED_TOKEN = /^malformed TSRX at byte \d+: expected (?:an `@case`, `@default`, or closing `\}`|`:` after an `@case` expression|an annotation value|a shorthand attribute's name or a spread `\.\.\.`|a JSX attribute, `>`, or `\/>`|an operator or the end of the expression after a control-flow expression)$/u;
+function directiveBefore(source, offset) {
+	let index = offset;
+	const skipSpace = () => {
+		while (index > 0 && WHITESPACE.test(source[index - 1])) index -= 1;
+	};
+	skipSpace();
+	if (source[index - 1] === ")") {
+		let depth = 0;
+		let open = -1;
+		for (let cursor = index - 1; cursor >= 0; cursor -= 1) if (source[cursor] === ")") depth += 1;
+		else if (source[cursor] === "(" && --depth === 0) {
+			open = cursor;
+			break;
+		}
+		if (open === -1) return void 0;
+		index = open;
+		skipSpace();
+	}
+	const end = index;
+	while (index > 0 && /[a-z]/u.test(source[index - 1])) index -= 1;
+	if (index === end) return void 0;
+	return {
+		keyword: source.slice(index, end),
+		start: index,
+		at: source[index - 1] === "@"
+	};
+}
+function decoratorBefore(source, offset) {
+	let index = offset;
+	while (index > 0 && WHITESPACE.test(source[index - 1])) index -= 1;
+	if (source[index - 1] === ")") {
+		let depth = 0;
+		let cursor = index - 1;
+		for (; cursor >= 0; cursor -= 1) if (source[cursor] === ")") depth += 1;
+		else if (source[cursor] === "(" && --depth === 0) break;
+		if (cursor < 0) return false;
+		index = cursor;
+	}
+	const end = index;
+	while (index > 0 && /[\w$.]/u.test(source[index - 1])) index -= 1;
+	if (index === end || source[index - 1] !== "@") return false;
+	const name = /^[A-Za-z_$][\w$]*/u.exec(source.slice(index, end))?.[0];
+	if (name === void 0 || ACORN_KEYWORDS.has(name) || Object.hasOwn(BRANCH_DIRECTIVES, name)) return false;
+	const before = index - 2;
+	if (before >= 0 && !/[\s{};]/u.test(source[before])) return false;
+	let depth = 0;
+	for (let cursor = before; cursor >= 0; cursor -= 1) if (source[cursor] === "}") depth += 1;
+	else if (source[cursor] === "{" && depth-- === 0) return !/\bclass\b[^{};]*$/u.test(source.slice(0, cursor));
+	return true;
+}
+function tokenEndAfter(source, offset) {
+	let index = offset;
+	while (index < source.length) if (WHITESPACE.test(source[index])) index += 1;
+	else if (source[index] === "/" && (source[index + 1] === "/" || source[index + 1] === "*")) index = skipComment(source, index);
+	else break;
+	return readIdentifier(source, index)?.end ?? Math.min(index + 1, source.length);
+}
+function templateEnd(source, start) {
+	let depth = 0;
+	let inTag = false;
+	for (let index = start; index < source.length; index += 1) {
+		const character = source[index];
+		if (character === "/" && (source[index + 1] === "/" || source[index + 1] === "*")) {
+			index = skipComment(source, index) - 1;
+			continue;
+		}
+		if ((depth > 0 || inTag) && (character === "\"" || character === "'" || character === "`")) {
+			index = skipQuoted(source, index, character) - 1;
+			continue;
+		}
+		if (character === "{") depth += 1;
+		else if (character === "}") {
+			if (depth === 0) return index;
+			depth -= 1;
+		} else if (depth === 0 && character === "<") inTag = true;
+		else if (depth === 0 && character === ">") inTag = false;
+	}
+	return -1;
+}
+function coreDiagnostic(error, source) {
+	const message = compatibleDiagnosticMessage(error);
 	const { start, end } = compatibleDiagnosticSpan(error, source);
-	translated.code = compatibleDiagnosticCode(error, translated.message);
+	const reported = {
+		message,
+		code: compatibleDiagnosticCode(error, message),
+		start,
+		end,
+		raisedAt: void 0
+	};
+	if (message === RENDER_BEFORE_STATEMENT) return {
+		...reported,
+		message: STATEMENT_AFTER_OUTPUT
+	};
+	if (typeof source !== "string" || !Number.isInteger(start)) return reported;
+	const unexpected = (code = "TS1012", message = UNEXPECTED_TOKEN) => ({
+		...reported,
+		code,
+		message
+	});
+	const keyword = (directive) => ({
+		...reported,
+		code: "TS1359",
+		message: `Unexpected keyword '${directive.keyword}'`,
+		start: directive.start,
+		raisedAt: tokenEndAfter(source, directive.start + directive.keyword.length)
+	});
+	if (EXPECTED_PAREN.test(message)) {
+		const directive = directiveBefore(source, start);
+		if (directive?.at && [
+			"if",
+			"for",
+			"switch",
+			"while"
+		].includes(directive.keyword)) return keyword(directive);
+		return unexpected();
+	}
+	if (EXPECTED_BRACED_BODY.test(message)) {
+		const directive = directiveBefore(source, start);
+		if (directive?.at && directive.keyword === "try") return keyword(directive);
+		if (directive?.at && (directive.keyword === "catch" || directive.keyword === "pending")) return unexpected();
+		return unexpected("TSRX1008", DIRECTIVE_BODY_EXPECTED);
+	}
+	const branch = EXPECTED_BRANCH.exec(message)?.[1];
+	if (branch !== void 0) return {
+		...unexpected("TSRX1009", `Expected \`@${branch}\` after \`@${BRANCH_DIRECTIVES[branch]}\` block.`),
+		raisedAt: start + branch.length
+	};
+	if (EXPECTED_TRY_HANDLER.test(message)) {
+		const handler = unexpected("TSRX1010", TRY_HANDLER_MISSING);
+		if (source[start] !== "@") return handler;
+		return {
+			...handler,
+			start: start + 1,
+			end: Math.max(end ?? start, start + 2)
+		};
+	}
+	if (EXPECTED_OWNING_CONTROL.test(message) && source[start] === "@") {
+		const word = readIdentifier(source, start + 1);
+		if (word !== null && ACORN_KEYWORDS.has(word.name)) return keyword({
+			keyword: word.name,
+			start: word.start
+		});
+	}
+	if (MALFORMED_UNEXPECTED_TOKEN.test(message)) return unexpected();
+	if (SHORTHAND_BRACE_EXPECTED.test(message)) return unexpected("TS1005", "'}' expected.");
+	const reserved = RESERVED_WORD.exec(message)?.[1];
+	if (reserved !== void 0) {
+		if (!STRICT_RESERVED_WORDS.has(reserved)) return keyword({
+			keyword: reserved,
+			start
+		});
+		return unexpected("TS1212", `The keyword '${reserved}' is reserved`);
+	}
+	if (message === UNEXPECTED_TOKEN) {
+		const word = readIdentifier(source, start);
+		if (word !== null && source[start - 1] === "@" && ACORN_KEYWORDS.has(word.name)) return keyword({
+			keyword: word.name,
+			start
+		});
+		if (decoratorBefore(source, start)) return unexpected("TS1206", LEADING_DECORATORS);
+	}
+	if (UNTERMINATED_ELEMENT.test(message) && source[start] === "<") {
+		const close = templateEnd(source, start);
+		const name = /^[^\s/>{]*(?:\{[^{}]*\})?[^\s/>]*/u.exec(source.slice(start + 1))?.[0] ?? "";
+		if (close !== -1) return {
+			...reported,
+			message: `Unclosed tag '<${name}>'. Expected '</${name}>' before end of template.`,
+			start: close,
+			end: close + 1
+		};
+	}
+	return reported;
+}
+function coreThrownError(error, filename, positionAt, source) {
+	const diagnostic = coreDiagnostic(error, source);
+	if (isCoreReportedError(diagnostic)) return compileError(diagnostic, filename, positionAt, "fatal", Error);
+	if (diagnostic.start === void 0) return compileError(diagnostic, filename, positionAt, "fatal", SyntaxError);
+	return acornRaise(diagnostic.message, diagnostic.start, positionAt, diagnostic.raisedAt ?? Math.max(diagnostic.end ?? diagnostic.start, diagnostic.start), diagnostic.code);
+}
+function toCompileError(error, filename, positionAt, type, source) {
+	return compileError(coreDiagnostic(error, source), filename, positionAt, type, SyntaxError);
+}
+function compileError({ message, code, start, end }, filename, positionAt, type, ErrorType) {
+	const translated = new ErrorType(message);
+	translated.code = code;
 	translated.pos = start;
 	translated.raisedAt = end;
 	translated.end = end;
@@ -1858,19 +2078,19 @@ function scopeDiagnostics(program, source) {
 function scopeFatalError(error, filename, positionAt) {
 	const fatal = error.compatFatal;
 	if (fatal.raise) return acornRaise(error.message, fatal.start, positionAt, fatal.raisedAt);
-	return toCompileError({
-		message: error.message,
-		labels: [{
-			start: fatal.start,
-			end: fatal.end
-		}]
-	}, filename, positionAt, "fatal", void 0);
+	const message = error.message;
+	return compileError({
+		message,
+		code: compatibleDiagnosticCode(null, message),
+		start: fatal.start,
+		end: fatal.end
+	}, filename, positionAt, "fatal", Error);
 }
 function strictError(errors, filename, positionAt, source) {
 	const error = errors.find((candidate) => candidate?.compatFatal !== null) ?? errors[0];
 	if (error?.compatFatal != null) return scopeFatalError(error, filename, positionAt);
-	if (isUnclosedTag(error)) return acornRaise(error.message, primarySpan(error).start ?? 0, positionAt);
-	return toCompileError(error, filename, positionAt, "fatal", source);
+	if (isUnclosedTag(error)) return unclosedTagRaise(error, positionAt);
+	return coreThrownError(error, filename, positionAt, source);
 }
 function mergeBySourceOrder(left, right) {
 	if (left.length === 0) return right;
@@ -2016,7 +2236,7 @@ function createTsrxCoreCompat(parser) {
 					if (isOperationalError(error) || !isSyntaxErrorLike(error)) throw error;
 					if (isDynamicTagNotExpression(error)) throw dynamicTagNotExpressionError(error, positions());
 					if (isUnclosedTag(error)) throw unclosedTagFailure(error, collecting, positions(), source);
-					const translated = toCompileError(error, resolvedFilename, positions(), "fatal", source);
+					const translated = coreThrownError(error, resolvedFilename, positions(), source);
 					if (collecting && Array.isArray(options?.errors)) options.errors.push(toCompileError(error, resolvedFilename, positions(), "usage", source));
 					throw translated;
 				}
@@ -2089,7 +2309,7 @@ function createTsrxCoreCompat(parser) {
 			} catch (error) {
 				if (isOperationalError(error) || !isSyntaxErrorLike(error)) throw error;
 				if (isDynamicTagNotExpression(error)) throw dynamicTagNotExpressionError(error, positions());
-				const translated = toCompileError(error, resolvedFilename, positions(), "fatal", source);
+				const translated = coreThrownError(error, resolvedFilename, positions(), source);
 				if (collecting && Array.isArray(options?.errors)) options.errors.push(toCompileError(error, resolvedFilename, positions(), "usage", source));
 				throw translated;
 			}
@@ -2098,7 +2318,7 @@ function createTsrxCoreCompat(parser) {
 				if (Array.isArray(options?.errors)) for (const error of nativeErrors) options.errors.push(toCompileError(error, resolvedFilename, positions(), "usage", source));
 			}
 			if (program === null) {
-				if (nativeErrors.length > 0) throw toCompileError(nativeErrors[0], resolvedFilename, positions(), "fatal", source);
+				if (nativeErrors.length > 0) throw coreThrownError(nativeErrors[0], resolvedFilename, positions(), source);
 				throw missingProgramError(resolvedFilename);
 			}
 			materializeCompatibilityProgram(program, source, resolvedFilename, Boolean(options?.loose), positions());

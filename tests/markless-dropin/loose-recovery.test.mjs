@@ -16,13 +16,14 @@ function exportedFunction(program, name = "App") {
 }
 
 test("generated JavaScript preserves @tsrx/core's undefined-export early error", () => {
+  // Core raises it through acorn, with the position after the message.
   assert.throws(
     () => api.parseModule("export { missing };", "generated.js"),
     (error) =>
       error instanceof SyntaxError &&
-      error.message === "Export 'missing' is not defined" &&
-      error.fileName === "generated.js" &&
-      error.type === "fatal",
+      error.message === "Export 'missing' is not defined (1:9)" &&
+      error.code === "TS2304" &&
+      error.pos === 9,
   );
 });
 

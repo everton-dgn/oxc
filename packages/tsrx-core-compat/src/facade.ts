@@ -424,7 +424,13 @@ function isUnclosedTag(error) {
 
 // An error raised as acorn raises it: `code`, `pos`, a `{ line, column }` `loc`, and `raisedAt`,
 // with the position appended to the message and no `end` or `type`.
-function acornRaise(message, start, positionAt, raisedAt = start) {
+function acornRaise(
+  message,
+  start,
+  positionAt,
+  raisedAt = start,
+  code = compatibleDiagnosticCode(null, message),
+) {
   const loc = positionAt(start);
   const raised = new SyntaxError(`${message} (${loc.line}:${loc.column})`) as SyntaxError & {
     code?: string;
@@ -432,7 +438,7 @@ function acornRaise(message, start, positionAt, raisedAt = start) {
     loc?: unknown;
     raisedAt?: number;
   };
-  raised.code = compatibleDiagnosticCode(null, message);
+  raised.code = code;
   raised.pos = start;
   raised.loc = loc;
   raised.raisedAt = raisedAt;
@@ -445,7 +451,13 @@ function unclosedTagFailure(error, collecting, positionAt, source) {
   if (collecting && typeof source === "string") {
     return acornRaise("'}' expected.", source.length, positionAt);
   }
-  return acornRaise(error.message, primarySpan(error).start ?? 0, positionAt);
+  return unclosedTagRaise(error, positionAt);
+}
+
+// Acorn stops reading an unclosed tag after the `}` that ends its template.
+function unclosedTagRaise(error, positionAt) {
+  const { start = 0, end } = primarySpan(error);
+  return acornRaise(error.message, start, positionAt, Math.max(end ?? start, start + 1));
 }
 
 function compatibleDiagnosticCode(error, message) {
@@ -455,10 +467,271 @@ function compatibleDiagnosticCode(error, message) {
   return code ?? (oxc === null ? undefined : `TS${oxc[1]}`);
 }
 
-function toCompileError(error, filename, positionAt, type, source) {
-  const translated = new SyntaxError(compatibleDiagnosticMessage(error)) as CompatSyntaxError;
+// `@tsrx/core` 0.5.2 reports these mistakes with its own `error()`, not acorn's `raise`: a strict
+// parse throws them as a plain `Error` with `fileName`, `end`, `type: "fatal"`, and a `loc` over
+// the span, and no position in the message. Every other mistake it throws is acorn's
+// `SyntaxError`.
+const CORE_ERROR_CODES = new Set(["TSRX1004", "TSRX1007", "TSRX2001", "TSRX2011", "TSRX2012", "TSRX2014"]);
+const CORE_ERROR_MESSAGE =
+  /^(?:Identifier|type) '[^']+' has already been declared|^Argument name clash$|^Cannot redeclare /u;
+
+function isCoreReportedError(diagnostic) {
+  return CORE_ERROR_CODES.has(diagnostic.code) || CORE_ERROR_MESSAGE.test(diagnostic.message);
+}
+
+const UNEXPECTED_TOKEN = "Unexpected token";
+const DIRECTIVE_BODY_EXPECTED = "Expected `{` after JSX control-flow directive.";
+const TRY_HANDLER_MISSING = "Missing `@catch` or `@pending` after `@try` block.";
+const LEADING_DECORATORS = "Leading decorators must be attached to a class declaration.";
+// The directive each branch follows, for core's "Expected `@else` after `@if` block."
+const BRANCH_DIRECTIVES = { else: "if", empty: "for", catch: "try", pending: "try" };
+// The words acorn reads as keywords after an `@`, which it reports as `Unexpected keyword`.
+const ACORN_KEYWORDS = new Set(
+  (
+    "break case catch continue debugger default do else finally for function if return switch " +
+    "throw try var while with null true false instanceof typeof void delete new in this const " +
+    "class extends export import super"
+  ).split(" "),
+);
+const EXPECTED_PAREN = /^malformed TSRX at byte \d+: expected `\(`$/u;
+const EXPECTED_BRACED_BODY = /^malformed TSRX at byte \d+: expected a braced control-flow body$/u;
+const EXPECTED_BRANCH = /^malformed TSRX at byte \d+: expected `@(else|empty|pending|catch)`$/u;
+const EXPECTED_TRY_HANDLER = /^malformed TSRX at byte \d+: expected an `@pending` or `@catch` clause$/u;
+const EXPECTED_OWNING_CONTROL = /^malformed TSRX at byte \d+: expected an owning TSRX control$/u;
+const RESERVED_WORD = /^Identifier expected\. '([^']+)' is a reserved word that cannot be used here\.$/u;
+// The words reserved only in strict mode, which acorn reports as `The keyword '…' is reserved`.
+const STRICT_RESERVED_WORDS = new Set(
+  "implements interface let package private protected public static yield".split(" "),
+);
+const RENDER_BEFORE_STATEMENT = "render expression precedes another statement";
+const STATEMENT_AFTER_OUTPUT =
+  "Code must be at the top of '@{ }'; statements cannot follow the rendered output.";
+const SHORTHAND_BRACE_EXPECTED =
+  /^malformed TSRX at byte \d+: expected `\}` after a shorthand attribute's name$/u;
+const UNTERMINATED_ELEMENT = /^unterminated JSX element starting at byte \d+$/u;
+// The malformed-directive and malformed-attribute reports acorn raises as `Unexpected token`.
+const MALFORMED_UNEXPECTED_TOKEN =
+  /^malformed TSRX at byte \d+: expected (?:an `@case`, `@default`, or closing `\}`|`:` after an `@case` expression|an annotation value|a shorthand attribute's name or a spread `\.\.\.`|a JSX attribute, `>`, or `\/>`|an operator or the end of the expression after a control-flow expression)$/u;
+
+// The directive keyword after an `@` that ends before `offset`, give or take whitespace and a
+// `( … )` header: its name, where it starts, and whether an `@` precedes it.
+function directiveBefore(source, offset) {
+  let index = offset;
+  const skipSpace = () => {
+    while (index > 0 && WHITESPACE.test(source[index - 1])) index -= 1;
+  };
+  skipSpace();
+  if (source[index - 1] === ")") {
+    let depth = 0;
+    let open = -1;
+    for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+      if (source[cursor] === ")") depth += 1;
+      else if (source[cursor] === "(" && --depth === 0) {
+        open = cursor;
+        break;
+      }
+    }
+    if (open === -1) return undefined;
+    index = open;
+    skipSpace();
+  }
+  const end = index;
+  while (index > 0 && /[a-z]/u.test(source[index - 1])) index -= 1;
+  if (index === end) return undefined;
+  return { keyword: source.slice(index, end), start: index, at: source[index - 1] === "@" };
+}
+
+// Whether a decorator (`@x`, `@x.y`, `@x()`) ends right before `offset`, at the start of a
+// statement, where acorn reads it as a leading decorator with no class after it.
+function decoratorBefore(source, offset) {
+  let index = offset;
+  while (index > 0 && WHITESPACE.test(source[index - 1])) index -= 1;
+  if (source[index - 1] === ")") {
+    let depth = 0;
+    let cursor = index - 1;
+    for (; cursor >= 0; cursor -= 1) {
+      if (source[cursor] === ")") depth += 1;
+      else if (source[cursor] === "(" && --depth === 0) break;
+    }
+    if (cursor < 0) return false;
+    index = cursor;
+  }
+  const end = index;
+  while (index > 0 && /[\w$.]/u.test(source[index - 1])) index -= 1;
+  if (index === end || source[index - 1] !== "@") return false;
+  const name = /^[A-Za-z_$][\w$]*/u.exec(source.slice(index, end))?.[0];
+  if (name === undefined || ACORN_KEYWORDS.has(name) || Object.hasOwn(BRANCH_DIRECTIVES, name)) return false;
+  const before = index - 2;
+  if (before >= 0 && !/[\s{};]/u.test(source[before])) return false;
+  // In a class body a decorator with no member after it is a different mistake.
+  let depth = 0;
+  for (let cursor = before; cursor >= 0; cursor -= 1) {
+    if (source[cursor] === "}") depth += 1;
+    else if (source[cursor] === "{" && depth-- === 0) {
+      return !/\bclass\b[^{};]*$/u.test(source.slice(0, cursor));
+    }
+  }
+  return true;
+}
+
+// The end of the token after `offset`, past whitespace and comments: an identifier or keyword
+// whole, and any other token as its first character.
+function tokenEndAfter(source, offset) {
+  let index = offset;
+  while (index < source.length) {
+    if (WHITESPACE.test(source[index])) index += 1;
+    else if (source[index] === "/" && (source[index + 1] === "/" || source[index + 1] === "*")) {
+      index = skipComment(source, index);
+    } else break;
+  }
+  return readIdentifier(source, index)?.end ?? Math.min(index + 1, source.length);
+}
+
+// The `}` that ends the template an element starting at `start` is in: the first `}` outside the
+// element's tags, expression containers, and comments. `-1` when the source ends first.
+function templateEnd(source, start) {
+  let depth = 0;
+  let inTag = false;
+  for (let index = start; index < source.length; index += 1) {
+    const character = source[index];
+    if (character === "/" && (source[index + 1] === "/" || source[index + 1] === "*")) {
+      index = skipComment(source, index) - 1;
+      continue;
+    }
+    if ((depth > 0 || inTag) && (character === '"' || character === "'" || character === "`")) {
+      index = skipQuoted(source, index, character) - 1;
+      continue;
+    }
+    if (character === "{") depth += 1;
+    else if (character === "}") {
+      if (depth === 0) return index;
+      depth -= 1;
+    } else if (depth === 0 && character === "<") inTag = true;
+    else if (depth === 0 && character === ">") inTag = false;
+  }
+  return -1;
+}
+
+// A diagnostic as `@tsrx/core` 0.5.2 reports the mistake: its message, code, and span. The
+// malformed-directive reports take acorn's message and position for the token acorn stops at, and
+// an element its template ends before its closing tag is reported unclosed at that template's `}`.
+function coreDiagnostic(error, source) {
+  const message = compatibleDiagnosticMessage(error);
   const { start, end } = compatibleDiagnosticSpan(error, source);
-  translated.code = compatibleDiagnosticCode(error, translated.message);
+  const reported = {
+    message,
+    code: compatibleDiagnosticCode(error, message),
+    start,
+    end,
+    raisedAt: undefined as number | undefined,
+  };
+  if (message === RENDER_BEFORE_STATEMENT) return { ...reported, message: STATEMENT_AFTER_OUTPUT };
+  if (typeof source !== "string" || !Number.isInteger(start)) return reported;
+  const unexpected = (code = "TS1012", message = UNEXPECTED_TOKEN) => ({ ...reported, code, message });
+  // Acorn raises an unexpected keyword once it has read the token after it.
+  const keyword = (directive) => ({
+    ...reported,
+    code: "TS1359",
+    message: `Unexpected keyword '${directive.keyword}'`,
+    start: directive.start,
+    raisedAt: tokenEndAfter(source, directive.start + directive.keyword.length),
+  });
+
+  if (EXPECTED_PAREN.test(message)) {
+    const directive = directiveBefore(source, start);
+    if (directive?.at && ["if", "for", "switch", "while"].includes(directive.keyword)) {
+      return keyword(directive);
+    }
+    return unexpected();
+  }
+  if (EXPECTED_BRACED_BODY.test(message)) {
+    const directive = directiveBefore(source, start);
+    if (directive?.at && directive.keyword === "try") return keyword(directive);
+    if (directive?.at && (directive.keyword === "catch" || directive.keyword === "pending")) {
+      return unexpected();
+    }
+    return unexpected("TSRX1008", DIRECTIVE_BODY_EXPECTED);
+  }
+  const branch = EXPECTED_BRANCH.exec(message)?.[1];
+  if (branch !== undefined) {
+    return {
+      ...unexpected(
+        "TSRX1009",
+        `Expected \`@${branch}\` after \`@${BRANCH_DIRECTIVES[branch]}\` block.`,
+      ),
+      raisedAt: start + branch.length,
+    };
+  }
+  if (EXPECTED_TRY_HANDLER.test(message)) {
+    const handler = unexpected("TSRX1010", TRY_HANDLER_MISSING);
+    if (source[start] !== "@") return handler;
+    return { ...handler, start: start + 1, end: Math.max(end ?? start, start + 2) };
+  }
+  if (EXPECTED_OWNING_CONTROL.test(message) && source[start] === "@") {
+    const word = readIdentifier(source, start + 1);
+    if (word !== null && ACORN_KEYWORDS.has(word.name)) {
+      return keyword({ keyword: word.name, start: word.start });
+    }
+  }
+  if (MALFORMED_UNEXPECTED_TOKEN.test(message)) return unexpected();
+  if (SHORTHAND_BRACE_EXPECTED.test(message)) return unexpected("TS1005", "'}' expected.");
+  const reserved = RESERVED_WORD.exec(message)?.[1];
+  if (reserved !== undefined) {
+    if (!STRICT_RESERVED_WORDS.has(reserved)) return keyword({ keyword: reserved, start });
+    return unexpected("TS1212", `The keyword '${reserved}' is reserved`);
+  }
+  if (message === UNEXPECTED_TOKEN) {
+    const word = readIdentifier(source, start);
+    if (word !== null && source[start - 1] === "@" && ACORN_KEYWORDS.has(word.name)) {
+      return keyword({ keyword: word.name, start });
+    }
+    if (decoratorBefore(source, start)) return unexpected("TS1206", LEADING_DECORATORS);
+  }
+  if (UNTERMINATED_ELEMENT.test(message) && source[start] === "<") {
+    const close = templateEnd(source, start);
+    const name = /^[^\s/>{]*(?:\{[^{}]*\})?[^\s/>]*/u.exec(source.slice(start + 1))?.[0] ?? "";
+    if (close !== -1) {
+      return {
+        ...reported,
+        message: `Unclosed tag '<${name}>'. Expected '</${name}>' before end of template.`,
+        start: close,
+        end: close + 1,
+      };
+    }
+  }
+  return reported;
+}
+
+// The error a strict parse throws for `error`, in the shape `@tsrx/core` 0.5.2 throws it: acorn's
+// `SyntaxError`, with the `(line:column)` of `pos` after the message and `loc` at `pos`, or core's
+// own `Error` for the mistakes it reports itself.
+function coreThrownError(error, filename, positionAt, source) {
+  const diagnostic = coreDiagnostic(error, source);
+  if (isCoreReportedError(diagnostic)) {
+    return compileError(diagnostic, filename, positionAt, "fatal", Error);
+  }
+  // With no position to report, the error keeps its span shape.
+  if (diagnostic.start === undefined) {
+    return compileError(diagnostic, filename, positionAt, "fatal", SyntaxError);
+  }
+  return acornRaise(
+    diagnostic.message,
+    diagnostic.start,
+    positionAt,
+    diagnostic.raisedAt ?? Math.max(diagnostic.end ?? diagnostic.start, diagnostic.start),
+    diagnostic.code,
+  );
+}
+
+// A collected error, as core records it: `pos`, `end` and `raisedAt`, a `loc` over the span,
+// `fileName`, and `type`.
+function toCompileError(error, filename, positionAt, type, source) {
+  return compileError(coreDiagnostic(error, source), filename, positionAt, type, SyntaxError);
+}
+
+function compileError({ message, code, start, end }, filename, positionAt, type, ErrorType) {
+  const translated = new ErrorType(message) as CompatSyntaxError;
+  translated.code = code;
   translated.pos = start;
   translated.raisedAt = end;
   translated.end = end;
@@ -2361,17 +2634,18 @@ function scopeDiagnostics(program, source) {
 
 // Core raises a few scope errors through acorn (`Export 'x' is not defined`, a redeclared type
 // alias): a strict parse throws a `SyntaxError` with `pos`, a `{ line, column }` `loc`, and
-// `raisedAt`, and the position appended to the message. The rest throw as a `CompileError` one
-// character wide at the redeclared name.
+// `raisedAt`, and the position appended to the message. The rest throw as core's own `Error`
+// one character wide at the redeclared name.
 function scopeFatalError(error, filename, positionAt) {
   const fatal = error.compatFatal;
   if (fatal.raise) return acornRaise(error.message, fatal.start, positionAt, fatal.raisedAt);
-  return toCompileError(
-    { message: error.message, labels: [{ start: fatal.start, end: fatal.end }] },
+  const message = error.message;
+  return compileError(
+    { message, code: compatibleDiagnosticCode(null, message), start: fatal.start, end: fatal.end },
     filename,
     positionAt,
     "fatal",
-    undefined,
+    Error,
   );
 }
 
@@ -2380,8 +2654,8 @@ function scopeFatalError(error, filename, positionAt) {
 function strictError(errors, filename, positionAt, source) {
   const error = errors.find((candidate) => candidate?.compatFatal !== null) ?? errors[0];
   if (error?.compatFatal != null) return scopeFatalError(error, filename, positionAt);
-  if (isUnclosedTag(error)) return acornRaise(error.message, primarySpan(error).start ?? 0, positionAt);
-  return toCompileError(error, filename, positionAt, "fatal", source);
+  if (isUnclosedTag(error)) return unclosedTagRaise(error, positionAt);
+  return coreThrownError(error, filename, positionAt, source);
 }
 
 // Merges two diagnostic lists by start, keeping each list's own order.
@@ -2583,7 +2857,7 @@ export function createTsrxCoreCompat(parser) {
             throw dynamicTagNotExpressionError(error, positions());
           }
           if (isUnclosedTag(error)) throw unclosedTagFailure(error, collecting, positions(), source);
-          const translated = toCompileError(error, resolvedFilename, positions(), "fatal", source);
+          const translated = coreThrownError(error, resolvedFilename, positions(), source);
           if (collecting && Array.isArray(options?.errors)) {
             options.errors.push(
               toCompileError(error, resolvedFilename, positions(), "usage", source),
@@ -2704,7 +2978,7 @@ export function createTsrxCoreCompat(parser) {
       } catch (error) {
         if (isOperationalError(error) || !isSyntaxErrorLike(error)) throw error;
         if (isDynamicTagNotExpression(error)) throw dynamicTagNotExpressionError(error, positions());
-        const translated = toCompileError(error, resolvedFilename, positions(), "fatal", source);
+        const translated = coreThrownError(error, resolvedFilename, positions(), source);
         if (collecting && Array.isArray(options?.errors)) {
           options.errors.push(
             toCompileError(error, resolvedFilename, positions(), "usage", source),
@@ -2728,7 +3002,7 @@ export function createTsrxCoreCompat(parser) {
 
       if (program === null) {
         if (nativeErrors.length > 0) {
-          throw toCompileError(nativeErrors[0], resolvedFilename, positions(), "fatal", source);
+          throw coreThrownError(nativeErrors[0], resolvedFilename, positions(), source);
         }
         throw missingProgramError(resolvedFilename);
       }
