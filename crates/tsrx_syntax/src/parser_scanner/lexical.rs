@@ -209,7 +209,7 @@ impl Scanner<'_> {
         if self.bytes.get(open) != Some(&b'(') {
             return false;
         }
-        let Some(close) = self.balanced_parameters_end(open) else {
+        let Some(close) = self.bracket_group_end(open) else {
             return false;
         };
         self.skip_trivia(close).is_ok_and(|next| {
@@ -249,9 +249,15 @@ impl Scanner<'_> {
         None
     }
 
-    /// The offset after the `)` that closes the parameter list opened at `start`, counting nested
+    /// The offset after the bracket that closes the `(`, `[`, or `{` at `start`, counting nested
     /// brackets of every kind and skipping strings, template literal types, and comments.
-    fn balanced_parameters_end(&self, start: usize) -> Option<usize> {
+    fn bracket_group_end(&self, start: usize) -> Option<usize> {
+        let close = match self.bytes.get(start)? {
+            b'(' => b')',
+            b'[' => b']',
+            b'{' => b'}',
+            _ => return None,
+        };
         let mut depth = 0_u32;
         let mut index = start;
         while let Some(&byte) = self.bytes.get(index) {
@@ -272,13 +278,119 @@ impl Scanner<'_> {
                     depth = depth.checked_sub(1)?;
                     index += 1;
                     if depth == 0 {
-                        return (byte == b')').then_some(index);
+                        return (byte == close).then_some(index);
                     }
                 }
                 _ => index += 1,
             }
         }
         None
+    }
+
+    /// True when the `(` at `open` can open a parameter list: a name or keyword sits before it,
+    /// as in `App(`, `render(`, or `function (`, the `]` of a computed method name, as in
+    /// `[key](`, or the `>` that closes a type parameter list, as in `App<T>(`.
+    pub(super) fn opens_parameter_list(&self, open: usize) -> bool {
+        let end = trim_ascii_end(self.bytes, 0, open);
+        identifier_continue_before(self.bytes, end)
+            || end >= 1 && self.bytes[end - 1] == b']'
+            || end >= 2 && self.bytes[end - 1] == b'>' && self.bytes[end - 2] != b'='
+    }
+
+    /// The offset of a template body `@{` that directly follows the return type annotation
+    /// whose `:` is at `colon`, as in `(): Element<'div'> @{`. The scanner reads a type's `<` and
+    /// `>` as operators, so without this a type that ends in type arguments would leave it
+    /// expecting an operand and read the `@{` as an expression code block.
+    pub(super) fn return_type_template_body(&self, colon: usize) -> Option<usize> {
+        let end = self.type_annotation_end(colon + 1)?;
+        (self.bytes.get(end..end + 2) == Some(b"@{")).then_some(end)
+    }
+
+    /// The offset of the first token past the TypeScript type that begins at `index`, or `None`
+    /// when no type begins there. This reads the shapes a return type takes: names and member
+    /// names with type arguments, literals, bracketed types, unions and intersections, function
+    /// types, the type operators, type predicates, and conditional types.
+    fn type_annotation_end(&self, mut index: usize) -> Option<usize> {
+        let mut expect_operand = true;
+        loop {
+            index = self.skip_trivia(index).ok()?;
+            let byte = *self.bytes.get(index)?;
+            let next = self.bytes.get(index + 1).copied();
+            if expect_operand {
+                match byte {
+                    b'|' | b'&' => index += 1,
+                    b'<' => index = self.type_list_end(index + 1)?,
+                    b'(' | b'[' | b'{' => {
+                        index = self.bracket_group_end(index)?;
+                        expect_operand = false;
+                    }
+                    b'\'' | b'"' => {
+                        index = self.skip_quote(index, byte).ok()?;
+                        expect_operand = false;
+                    }
+                    b'`' => {
+                        index = self.skip_template_raw(index, self.bytes.len()).ok()?;
+                        expect_operand = false;
+                    }
+                    b'-' if next.is_some_and(|next| next.is_ascii_digit()) => {
+                        index = self.skip_number(index + 1);
+                        expect_operand = false;
+                    }
+                    b'0'..=b'9' => {
+                        index = self.skip_number(index);
+                        expect_operand = false;
+                    }
+                    _ if self.identifier_start_width(index).is_some() => {
+                        let end = self.skip_identifier(index);
+                        expect_operand = matches!(
+                            &self.bytes[index..end],
+                            b"keyof"
+                                | b"typeof"
+                                | b"readonly"
+                                | b"infer"
+                                | b"unique"
+                                | b"asserts"
+                                | b"new"
+                                | b"abstract"
+                        );
+                        index = end;
+                    }
+                    _ => return None,
+                }
+            } else {
+                match byte {
+                    b'.' if next != Some(b'.') => {
+                        index += 1;
+                        expect_operand = true;
+                    }
+                    b'[' => index = self.bracket_group_end(index)?,
+                    b'<' => index = self.type_list_end(index + 1)?,
+                    b'|' | b'&' if next != Some(byte) => {
+                        index += 1;
+                        expect_operand = true;
+                    }
+                    b'=' if next == Some(b'>') => {
+                        index += 2;
+                        expect_operand = true;
+                    }
+                    b'?' if !matches!(next, Some(b'?' | b'.')) => {
+                        index += 1;
+                        expect_operand = true;
+                    }
+                    b':' => {
+                        index += 1;
+                        expect_operand = true;
+                    }
+                    _ if self.bare_keyword_at(index, b"is")
+                        || self.bare_keyword_at(index, b"extends") =>
+                    {
+                        index = self.skip_identifier(index);
+                        expect_operand = true;
+                    }
+                    _ => return Some(index),
+                }
+            }
+        }
     }
 
     pub(super) fn skip_line_comment(&self, mut index: usize) -> usize {

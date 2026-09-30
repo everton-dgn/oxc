@@ -49,7 +49,11 @@ impl Scanner<'_> {
         let mut closed_control_paren = false;
         let mut pending_statement_body = false;
         let mut pending_arrow_body = false;
-        let mut parens = TinyStack::<bool, 16>::new();
+        // Per open `(`: whether it follows a control keyword, and whether it can open a parameter
+        // list, so its `)` may be followed by a return type annotation.
+        let mut parens = TinyStack::<(bool, bool), 16>::new();
+        // The offset of a template body `@{` found right after a return type annotation.
+        let mut return_type_body = None;
 
         while index < self.bytes.len() {
             let byte = self.bytes[index];
@@ -196,7 +200,10 @@ impl Scanner<'_> {
                     pending_statement_body = false;
                 }
                 b'@' if self.bytes.get(index + 1) == Some(&b'{') => {
-                    if (can_start_expression || pending_statement_body) && !follows_arrow {
+                    if (can_start_expression || pending_statement_body)
+                        && !follows_arrow
+                        && return_type_body != Some(index)
+                    {
                         index =
                             self.scan_parser_code_block(index, ParserCodeBlockKind::Expression)?;
                         can_start_expression = false;
@@ -255,7 +262,7 @@ impl Scanner<'_> {
                                     == Some(b'='));
                     delimiters.push((close, block));
                     if byte == b'(' {
-                        parens.push(pending_control_paren);
+                        parens.push((pending_control_paren, self.opens_parameter_list(index)));
                     }
                     pending_control_paren = false;
                     closed_control_paren = false;
@@ -281,7 +288,14 @@ impl Scanner<'_> {
                         index += 1;
                     }
                     can_start_expression = if byte == b')' {
-                        let control = parens.pop().unwrap_or(false);
+                        let (control, parameters) = parens.pop().unwrap_or((false, false));
+                        if parameters
+                            && let Ok(colon) = self.skip_trivia(index)
+                            && self.bytes.get(colon) == Some(&b':')
+                            && let Some(body) = self.return_type_template_body(colon)
+                        {
+                            return_type_body = Some(body);
+                        }
                         closed_control_paren = control;
                         control
                     } else if byte == b'}' {
