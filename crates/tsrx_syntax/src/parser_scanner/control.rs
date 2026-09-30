@@ -20,6 +20,7 @@ impl Scanner<'_> {
         self.parents.pop();
         let end = result?;
         self.nodes[node as usize].span.end = to_u32(end)?;
+        self.reject_control_subscript(context, end)?;
         Ok(end)
     }
 
@@ -94,6 +95,7 @@ impl Scanner<'_> {
         self.parents.pop();
         let end = result?;
         self.nodes[node as usize].span.end = to_u32(end)?;
+        self.reject_control_subscript(context, end)?;
         Ok(end)
     }
 
@@ -149,6 +151,7 @@ impl Scanner<'_> {
         self.parents.pop();
         let end = result?;
         self.nodes[node as usize].span.end = to_u32(end)?;
+        self.reject_control_subscript(context, end)?;
         Ok(end)
     }
 
@@ -233,6 +236,7 @@ impl Scanner<'_> {
         self.parents.pop();
         let end = result?;
         self.nodes[node as usize].span.end = to_u32(end)?;
+        self.reject_control_subscript(context, end)?;
         Ok(end)
     }
 
@@ -326,6 +330,37 @@ impl Scanner<'_> {
             });
         }
         Ok(index)
+    }
+
+    /// An expression control takes no member access, call, tagged template, or non-null `!`, as
+    /// `@tsrx/core` 0.5.2 reads it: only an operator, a separator, or a closing bracket follows
+    /// it. OXC would read those as a subscript of the control's wrapper, so they fail here.
+    fn reject_control_subscript(
+        &self,
+        context: ControlContext,
+        end: usize,
+    ) -> Result<(), ProjectionError> {
+        if context != ControlContext::Expression {
+            return Ok(());
+        }
+        let next = self.skip_trivia(end)?;
+        let byte = |offset: usize| self.bytes.get(next + offset).copied();
+        let not_digit = |offset: usize| !byte(offset).is_some_and(|byte| byte.is_ascii_digit());
+        let same_line = !self.bytes[end..next].iter().any(|byte| matches!(byte, b'\n' | b'\r'));
+        let subscript = match byte(0) {
+            Some(b'(' | b'[' | b'`') => true,
+            Some(b'.') => not_digit(1),
+            Some(b'?') => byte(1) == Some(b'.') && not_digit(2),
+            Some(b'!') => same_line && byte(1) != Some(b'='),
+            _ => false,
+        };
+        if subscript {
+            return Err(ProjectionError::MalformedSyntax {
+                offset: to_u32(next)?,
+                expected: "an operator or the end of the expression after a control-flow expression",
+            });
+        }
+        Ok(())
     }
 
     pub(super) fn control_has_header(&self, start: usize, keyword: &[u8]) -> bool {

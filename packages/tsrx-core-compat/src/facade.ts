@@ -209,6 +209,9 @@ const MESSAGE_CODES: Array<[RegExp, string]> = [
   [/: expected hexadecimal digits in a Unicode escape$/u, "TS1125"],
   [/: expected a Unicode escape no greater than 0x10FFFF$/u, "TS1198"],
   [/^Keywords cannot contain escape characters$/u, "TS1260"],
+  // A member access, call, or `!` after a control-flow expression, which core reads as an
+  // unexpected token (tsrx-org/oxc#149).
+  [/: expected an operator or the end of the expression after a control-flow expression$/u, "TS1012"],
   [/^Unexpected token$/u, "TS1012"],
   [/^Unexpected token\. Did you mean `\{'\}'\}`/u, "TS1381"],
   [/^Unexpected token\. Did you mean `\{'>'\}`/u, "TS1382"],

@@ -6,7 +6,7 @@ import { parseModule } from "../../packages/tsrx-core-compat/dist/index.js";
 // Regression tests for the @tsrx/core 0.5.0 conformance issues tsrx-org/oxc #110, #112, #113,
 // #114, #115, #116, #117, #118, #125, #127, and #128. Every expected value below is what @tsrx/core 0.5.0 (tsrx main at
 // f78fada) returns for the same source, so a difference here is a difference from the reference
-// parser. The #111, #145, #146, #147, and #148 tests at the end take theirs from @tsrx/core 0.5.2.
+// parser. The #111, #145, #146, #147, #148, and #149 tests at the end take theirs from @tsrx/core 0.5.2.
 
 function findAll(root, predicate) {
   const found = [];
@@ -1404,4 +1404,181 @@ test("#148: an escaped combining mark or ID scalar continues a shorthand name, a
       );
     }
   }
+});
+
+// #149: an `@if`, `@for`, `@switch`, or `@try` expression that starts a larger expression, or
+// ends the file with nothing after its `}`. Each node outside the control, and the control itself,
+// as `[type, start, end, "line:column-line:column"]`, in source order.
+const controlOutline = (ast) => {
+  const outline = [];
+  const visit = (node) => {
+    if (node === null || typeof node !== "object") return;
+    if (Array.isArray(node)) {
+      for (const child of node) visit(child);
+      return;
+    }
+    if (typeof node.type === "string" && node.loc) {
+      const { start, end } = node.loc;
+      outline.push([
+        node.type,
+        node.start,
+        node.end,
+        `${start.line}:${start.column}-${end.line}:${end.column}`,
+      ]);
+    }
+    if (/^JSX(?:If|For|Switch|Try)Expression$/u.test(node.type)) return;
+    for (const [key, child] of Object.entries(node)) {
+      if (key === "loc" || key === "metadata" || /omments$/u.test(key)) continue;
+      visit(child);
+    }
+  };
+  visit(ast);
+  return outline;
+};
+
+test("#149: a control-flow expression is the left operand, test, or first expression, as in core", () => {
+  for (const [source, outline] of [
+    [
+      "const content = @if (ready) {\n\t<p>Ready</p>\n} || 'Loading';",
+      [
+        ["Program", 0, 59, "1:0-3:15"],
+        ["VariableDeclaration", 0, 59, "1:0-3:15"],
+        ["VariableDeclarator", 6, 58, "1:6-3:14"],
+        ["Identifier", 6, 13, "1:6-1:13"],
+        ["LogicalExpression", 16, 58, "1:16-3:14"],
+        ["JSXIfExpression", 16, 45, "1:16-3:1"],
+        ["Literal", 49, 58, "3:5-3:14"],
+      ],
+    ],
+    [
+      "const x = @if (a) {\n\t<p />\n} || @if (b) {\n\t<q />\n} && 'y';",
+      [
+        ["Program", 0, 58, "1:0-5:9"],
+        ["VariableDeclaration", 0, 58, "1:0-5:9"],
+        ["VariableDeclarator", 6, 57, "1:6-5:8"],
+        ["Identifier", 6, 7, "1:6-1:7"],
+        ["LogicalExpression", 10, 57, "1:10-5:8"],
+        ["JSXIfExpression", 10, 28, "1:10-3:1"],
+        ["LogicalExpression", 32, 57, "3:5-5:8"],
+        ["JSXIfExpression", 32, 50, "3:5-5:1"],
+        ["Literal", 54, 57, "5:5-5:8"],
+      ],
+    ],
+    [
+      "const content = @if (ready) {\n\t<p>Ready</p>\n} ? a : b;",
+      [
+        ["Program", 0, 54, "1:0-3:10"],
+        ["VariableDeclaration", 0, 54, "1:0-3:10"],
+        ["VariableDeclarator", 6, 53, "1:6-3:9"],
+        ["Identifier", 6, 13, "1:6-1:13"],
+        ["ConditionalExpression", 16, 53, "1:16-3:9"],
+        ["JSXIfExpression", 16, 45, "1:16-3:1"],
+        ["Identifier", 48, 49, "3:4-3:5"],
+        ["Identifier", 52, 53, "3:8-3:9"],
+      ],
+    ],
+    [
+      "const rows = @for (const item of items) {\n\t<li>{item}</li>\n} as unknown;",
+      [
+        ["Program", 0, 72, "1:0-3:13"],
+        ["VariableDeclaration", 0, 72, "1:0-3:13"],
+        ["VariableDeclarator", 6, 71, "1:6-3:12"],
+        ["Identifier", 6, 10, "1:6-1:10"],
+        ["TSAsExpression", 13, 71, "1:13-3:12"],
+        ["JSXForExpression", 13, 60, "1:13-3:1"],
+        ["TSUnknownKeyword", 64, 71, "3:5-3:12"],
+      ],
+    ],
+    [
+      "const rows = @switch (v) {\n\t@case 1: {\n\t\t<p />\n\t}\n} satisfies unknown;",
+      [
+        ["Program", 0, 70, "1:0-5:20"],
+        ["VariableDeclaration", 0, 70, "1:0-5:20"],
+        ["VariableDeclarator", 6, 69, "1:6-5:19"],
+        ["Identifier", 6, 10, "1:6-1:10"],
+        ["TSSatisfiesExpression", 13, 69, "1:13-5:19"],
+        ["JSXSwitchExpression", 13, 51, "1:13-5:1"],
+        ["TSUnknownKeyword", 62, 69, "5:12-5:19"],
+      ],
+    ],
+    [
+      "x = (@try {\n\t<p />\n} @catch (e) {\n\t<q />\n}, 1);",
+      [
+        ["Program", 0, 47, "1:0-5:6"],
+        ["ExpressionStatement", 0, 47, "1:0-5:6"],
+        ["AssignmentExpression", 0, 46, "1:0-5:5"],
+        ["Identifier", 0, 1, "1:0-1:1"],
+        ["SequenceExpression", 5, 45, "1:5-5:4"],
+        ["JSXTryExpression", 5, 42, "1:5-5:1"],
+        ["Literal", 44, 45, "5:3-5:4"],
+      ],
+    ],
+  ]) {
+    assert.deepEqual(controlOutline(parseModule(source, "App.tsrx")), outline, source);
+  }
+});
+
+test("#149: a control-flow expression ends the file with nothing after its `}`, as in core", () => {
+  for (const [source, outline] of [
+    [
+      "const content = @if (ready) {\n\t<p>Ready</p>\n}",
+      [
+        ["Program", 0, 45, "1:0-3:1"],
+        ["VariableDeclaration", 0, 45, "1:0-3:1"],
+        ["VariableDeclarator", 6, 45, "1:6-3:1"],
+        ["Identifier", 6, 13, "1:6-1:13"],
+        ["JSXIfExpression", 16, 45, "1:16-3:1"],
+      ],
+    ],
+    [
+      "const rows = @for (const item of items) {\n\t<li>{item}</li>\n}",
+      [
+        ["Program", 0, 60, "1:0-3:1"],
+        ["VariableDeclaration", 0, 60, "1:0-3:1"],
+        ["VariableDeclarator", 6, 60, "1:6-3:1"],
+        ["Identifier", 6, 10, "1:6-1:10"],
+        ["JSXForExpression", 13, 60, "1:13-3:1"],
+      ],
+    ],
+    [
+      "const f = () => @switch (v) {\n\t@case 1: {\n\t\t<p />\n\t}\n}",
+      [
+        ["Program", 0, 54, "1:0-5:1"],
+        ["VariableDeclaration", 0, 54, "1:0-5:1"],
+        ["VariableDeclarator", 6, 54, "1:6-5:1"],
+        ["Identifier", 6, 7, "1:6-1:7"],
+        ["ArrowFunctionExpression", 10, 54, "1:10-5:1"],
+        ["JSXSwitchExpression", 16, 54, "1:16-5:1"],
+      ],
+    ],
+    [
+      "x = @try {\n\t<p />\n} @pending {\n\t<q />\n}",
+      [
+        ["Program", 0, 39, "1:0-5:1"],
+        ["ExpressionStatement", 0, 39, "1:0-5:1"],
+        ["AssignmentExpression", 0, 39, "1:0-5:1"],
+        ["Identifier", 0, 1, "1:0-1:1"],
+        ["JSXTryExpression", 4, 39, "1:4-5:1"],
+      ],
+    ],
+  ]) {
+    assert.deepEqual(controlOutline(parseModule(source, "App.tsrx")), outline, source);
+  }
+});
+
+test("#149: a member access, call, or `!` after a control-flow expression fails as in core", () => {
+  // Core reads no subscript after a control-flow expression, so each is an unexpected token at
+  // the first character after the control's `}`.
+  for (const tail of [".length", "()", "[0]", "?.x", "`t`", "!", "\n.length"]) {
+    const source = `const x = @if (a) {\n\t<p />\n}${tail};`;
+    const pos = source.indexOf(tail.trim(), 27);
+    assert.throws(
+      () => parseModule(source, "App.tsrx"),
+      (error) => error.code === "TS1012" && error.pos === pos,
+      source,
+    );
+  }
+  // `!=` is an operator, and a parenthesized control takes a subscript.
+  assert.doesNotThrow(() => parseModule("const x = @if (a) {\n\t<p />\n} != 1;", "App.tsrx"));
+  assert.doesNotThrow(() => parseModule("const x = (@if (a) {\n\t<p />\n}).length;", "App.tsrx"));
 });
