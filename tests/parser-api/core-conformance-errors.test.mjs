@@ -290,3 +290,53 @@ test("#142: collected errors keep core's span shape", () => {
     source,
   );
 });
+
+// tsrx-org/oxc#175: a bare `@` fails the parse at the token after it, which acorn reads as the
+// decorator's missing name, before any later mistake is reached.
+test("#175: the first error after a bare `@` is the one thrown, at the token after the `@`", () => {
+  const cases = [
+    // A later malformed `@switch` body doesn't hide the bare `@`.
+    [
+      "export function App(v) @{\n\t@\n\t@switch (v) { @case 1: { <span/> } @ }\n}",
+      { code: "TS1012", message: "Unexpected token (3:1)", pos: 30, raisedAt: 31, loc: { line: 3, column: 1 } },
+    ],
+    // The `@` of `@if`, not its `i`.
+    [
+      "export function App() @{\n\t@\n\t@if (v) { <span/> }\n}",
+      { code: "TS1012", message: "Unexpected token (3:1)", pos: 29, raisedAt: 30, loc: { line: 3, column: 1 } },
+    ],
+    // The Markless drop-in source for #143.
+    [
+      "export function App({ value, values }) @{\n\t@\n\t@if (value) { <span>{value}</span> } @\n\t@for (const item of values) { <span>{item}</span> } @\n\t@switch (value) { @case 'x': { <span>x</span> } @ }\n\t@try { <span>{value}</span> } @\n\tconst expression = value + @;\n}\n@",
+      { code: "TS1012", message: "Unexpected token (3:1)", pos: 46, raisedAt: 47, loc: { line: 3, column: 1 } },
+    ],
+    [
+      "export function App() @{\n\t@ /* c */ @switch (v) { @ }\n}",
+      { code: "TS1012", message: "Unexpected token (2:11)", pos: 36, raisedAt: 37, loc: { line: 2, column: 11 } },
+    ],
+  ];
+  for (const [source, expected] of cases) assertAcornError(thrown(source), expected, source);
+
+  // The token after the `@` decides the error: a keyword is TS1359, and a name makes a decorator.
+  const keyword = thrown("export function App() @{\n\t@\n\tconst x = 1; <p/>\n}");
+  assert.deepEqual(
+    [keyword.code, keyword.message, keyword.pos],
+    ["TS1359", "Unexpected keyword 'const' (3:1)", 29],
+  );
+  const decorator = thrown("export function App() @{\n\t@ x\n}");
+  assert.deepEqual(
+    [decorator.code, decorator.message, decorator.pos],
+    ["TS1206", "Leading decorators must be attached to a class declaration. (3:0)", 30],
+  );
+  // An `@` in element text is text.
+  const text = thrown("export function App(v) @{\n\t<div>\n\t@\n\t@switch (v) { @ }\n</div>\n}");
+  assert.deepEqual([text.code, text.message, text.pos], ["TS1012", "Unexpected token (4:15)", 51]);
+});
+
+test("#175: a missing `@catch` or `@pending` is at `try`, one past the `@`", () => {
+  const error = thrown("export function App(v) @{\n\t@try { <span/> } @\n}");
+  assert.deepEqual(
+    [error.code, error.message, error.pos],
+    ["TSRX1010", "Missing `@catch` or `@pending` after `@try` block. (2:2)", 28],
+  );
+});

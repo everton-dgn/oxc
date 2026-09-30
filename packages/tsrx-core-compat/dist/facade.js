@@ -387,8 +387,10 @@ function decoratorBefore(source, offset) {
 	}
 	const end = index;
 	while (index > 0 && /[\w$.]/u.test(source[index - 1])) index -= 1;
-	if (index === end || source[index - 1] !== "@") return false;
+	if (index === end) return false;
 	const name = /^[A-Za-z_$][\w$]*/u.exec(source.slice(index, end))?.[0];
+	while (index > 0 && WHITESPACE.test(source[index - 1])) index -= 1;
+	if (source[index - 1] !== "@") return false;
 	if (name === void 0 || ACORN_KEYWORDS.has(name) || Object.hasOwn(BRANCH_DIRECTIVES, name)) return false;
 	const before = index - 2;
 	if (before >= 0 && !/[\s{};]/u.test(source[before])) return false;
@@ -409,6 +411,22 @@ function isClassBody(source, open) {
 		if (depth < 0) return false;
 	}
 	return depth === 0;
+}
+function bareAtBefore(source, limit) {
+	for (const at of bareAtOffsets(source)) {
+		if (at >= limit) return void 0;
+		const open = skipTriviaBefore(source, at) - 1;
+		if (source[open] !== "{") continue;
+		if (source[open - 1] !== "@" && !directiveBefore(source, open)?.at) continue;
+		let next = at + 1;
+		while (next < source.length) if (WHITESPACE.test(source[next])) next += 1;
+		else if (source[next] === "/" && (source[next + 1] === "/" || source[next + 1] === "*")) next = skipComment(source, next);
+		else break;
+		if (next > limit) return void 0;
+		const word = readIdentifier(source, next);
+		if (word !== null && !ACORN_KEYWORDS.has(word.name)) return void 0;
+		return next;
+	}
 }
 function tokenEndAfter(source, offset) {
 	let index = offset;
@@ -497,6 +515,22 @@ function coreDiagnostic(error, source) {
 		start: directive.start,
 		raisedAt: tokenEndAfter(source, directive.start + directive.keyword.length)
 	});
+	const bare = bareAtBefore(source, start);
+	if (bare !== void 0) {
+		const word = readIdentifier(source, bare);
+		if (word !== null) return {
+			...keyword({
+				keyword: word.name,
+				start: bare
+			}),
+			end: word.end
+		};
+		return {
+			...unexpected(),
+			start: bare,
+			end: bare + 1
+		};
+	}
 	if (EXPECTED_PAREN.test(message)) {
 		const directive = directiveBefore(source, start);
 		if (directive?.at && [

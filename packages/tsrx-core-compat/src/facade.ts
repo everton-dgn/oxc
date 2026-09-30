@@ -576,8 +576,11 @@ function decoratorBefore(source, offset) {
   }
   const end = index;
   while (index > 0 && /[\w$.]/u.test(source[index - 1])) index -= 1;
-  if (index === end || source[index - 1] !== "@") return false;
+  if (index === end) return false;
   const name = /^[A-Za-z_$][\w$]*/u.exec(source.slice(index, end))?.[0];
+  // Acorn reads `@ x` as `@x`.
+  while (index > 0 && WHITESPACE.test(source[index - 1])) index -= 1;
+  if (source[index - 1] !== "@") return false;
   if (name === undefined || ACORN_KEYWORDS.has(name) || Object.hasOwn(BRANCH_DIRECTIVES, name)) return false;
   const before = index - 2;
   if (before >= 0 && !/[\s{};]/u.test(source[before])) return false;
@@ -604,6 +607,32 @@ function isClassBody(source, open) {
     if (depth < 0) return false;
   }
   return depth === 0;
+}
+
+// The token core stops at for the first bare `@` (an `@` with no name or `{` after it) that opens
+// a statement of a code block or directive body before `limit`: the token after the `@`, which
+// acorn reads as the decorator's missing name. A later diagnostic from the native parser's
+// structural scan never hides it, as it doesn't in core. `undefined` when there is none, or when
+// what follows the `@` is a name, which makes it a decorator.
+function bareAtBefore(source, limit) {
+  for (const at of bareAtOffsets(source)) {
+    if (at >= limit) return undefined;
+    const open = skipTriviaBefore(source, at) - 1;
+    if (source[open] !== "{") continue;
+    if (source[open - 1] !== "@" && !directiveBefore(source, open)?.at) continue;
+    let next = at + 1;
+    while (next < source.length) {
+      if (WHITESPACE.test(source[next])) next += 1;
+      else if (source[next] === "/" && (source[next + 1] === "/" || source[next + 1] === "*")) {
+        next = skipComment(source, next);
+      } else break;
+    }
+    if (next > limit) return undefined;
+    const word = readIdentifier(source, next);
+    if (word !== null && !ACORN_KEYWORDS.has(word.name)) return undefined;
+    return next;
+  }
+  return undefined;
 }
 
 // The end of the token after `offset`, past whitespace and comments: an identifier or keyword
@@ -706,6 +735,12 @@ function coreDiagnostic(error, source) {
     raisedAt: tokenEndAfter(source, directive.start + directive.keyword.length),
   });
 
+  const bare = bareAtBefore(source, start);
+  if (bare !== undefined) {
+    const word = readIdentifier(source, bare);
+    if (word !== null) return { ...keyword({ keyword: word.name, start: bare }), end: word.end };
+    return { ...unexpected(), start: bare, end: bare + 1 };
+  }
   if (EXPECTED_PAREN.test(message)) {
     const directive = directiveBefore(source, start);
     if (directive?.at && ["if", "for", "switch", "while"].includes(directive.keyword)) {
