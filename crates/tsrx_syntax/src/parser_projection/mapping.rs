@@ -21,8 +21,11 @@ pub struct MappedProjection {
     pub(super) anchors: Vec<SyntheticAnchor>,
 }
 
-/// Generated text that stands for one authored offset: the braces around a comment in JSX text
-/// stand for its ends, and a closing tag written for an element a `}` ended early for that `}`.
+/// Generated text that stands for one authored offset.
+///
+/// The braces around a comment in JSX text stand for its ends, a closing tag written for an
+/// element a `}` ended early for that `}`, and the empty points where an expression control's
+/// wrapper starts and ends for the control's ends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SyntheticAnchor {
     pub projected: ByteSpan,

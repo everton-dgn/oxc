@@ -257,6 +257,11 @@ impl<'a> Builder<'a> {
         if node.context == ControlContext::JsxChild {
             self.output.push('{');
         }
+        // An expression the control starts, such as the left operand of `||` or the test of
+        // `? :`, starts where the wrapper does, so the wrapper's start stands for the control's.
+        if node.context == ControlContext::Expression {
+            self.push_anchored("", node.span.start)?;
+        }
         let callee_start = self.output.len();
         write!(self.output, "{}W{node_index}_", self.prefix)
             .expect("writing to a String cannot fail");
@@ -279,6 +284,11 @@ impl<'a> Builder<'a> {
             self.prefix, self.prefix
         )
         .expect("writing to a String cannot fail");
+        // An expression the control ends, such as a declaration with nothing after the control's
+        // `}` before the end of the file, ends where the wrapper does.
+        if node.context == ControlContext::Expression {
+            self.push_anchored("", node.span.end)?;
+        }
         if node.context == ControlContext::JsxChild {
             self.output.push('}');
         }

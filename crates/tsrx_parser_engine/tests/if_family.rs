@@ -166,3 +166,37 @@ fn promotes_a_terminal_statement_if_to_code_block_render() {
     assert_if_head(tape, if_node, (19, 40), (24, 26));
     assert_no_scaffold(tape);
 }
+
+#[test]
+fn an_expression_if_starts_a_logical_expression_at_its_at_sign() {
+    // tsrx-org/oxc#149: the wrapper's start stands for the `@`, so the operator node that the
+    // control starts maps back to the control's authored start.
+    let source = "const value=@if(ok){one} || two;";
+    let result = parse_tsrx(&TsrxParseRequest { source }).expect("leading expression @if");
+    let tape = result.program();
+    let declaration = one_object(&program_body(tape));
+    assert_eq!(span(tape, declaration), (0, 32));
+    let declarator = one_object(&list_field(tape, declaration, "declarations"));
+    let logical = object_field(tape, declarator, "init");
+    require_type(tape, logical, "LogicalExpression");
+    assert_eq!(span(tape, logical), (12, 31));
+    let if_node = object_field(tape, logical, "left");
+    assert_if_head(tape, if_node, (12, 24), (16, 18));
+    assert_no_scaffold(tape);
+}
+
+#[test]
+fn an_expression_if_ends_a_declaration_at_the_end_of_the_file() {
+    // tsrx-org/oxc#149: with nothing after the control's `}`, the declaration ends where the
+    // wrapper does, which stands for the `}`.
+    let source = "const value=@if(ok){one}";
+    let result = parse_tsrx(&TsrxParseRequest { source }).expect("trailing expression @if");
+    let tape = result.program();
+    let declaration = one_object(&program_body(tape));
+    assert_eq!(span(tape, declaration), (0, 24));
+    let declarator = one_object(&list_field(tape, declaration, "declarations"));
+    assert_eq!(span(tape, declarator), (6, 24));
+    let if_node = object_field(tape, declarator, "init");
+    assert_if_head(tape, if_node, (12, 24), (16, 18));
+    assert_no_scaffold(tape);
+}
