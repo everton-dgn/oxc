@@ -997,6 +997,13 @@ function materializeDirectiveRange(value, positionAt) {
 	value.end = finalBranch.end;
 	if (value.loc?.end != null) value.loc.end = positionAt(value.end);
 }
+const SIGNATURE_TYPES = /* @__PURE__ */ new Set([
+	"TSCallSignatureDeclaration",
+	"TSConstructSignatureDeclaration",
+	"TSConstructorType",
+	"TSFunctionType",
+	"TSMethodSignature"
+]);
 function omitTsrxCoreCompatDefault(type, key, value) {
 	if (Array.isArray(value) && value.length === 0 && (key === "decorators" || key === "attributes" && (type === "ExportAllDeclaration" || type === "ExportNamedDeclaration" || type === "ImportDeclaration") || key === "implements" && (type === "ClassDeclaration" || type === "ClassExpression") || key === "extends" && type === "TSInterfaceDeclaration")) return true;
 	if (value == null && (key === "accessibility" || key === "directive" || key === "hashbang" || key === "options" || key === "phase" || key === "returnType" || key === "superTypeArguments" || key === "typeAnnotation" || key === "typeArguments" || key === "typeParameters" || type === "RestElement" && key === "value")) return true;
@@ -1154,6 +1161,20 @@ function materializeCompatibilityProgram(program, source, filename, loose, posit
 			value.metadata ??= { path: [] };
 			value.metadata.path ??= [];
 			value.metadata.module_keyword = value.kind;
+		}
+		if (SIGNATURE_TYPES.has(value.type) && "params" in value) {
+			const { params, returnType } = value;
+			delete value.params;
+			delete value.returnType;
+			value.typeParameters = value.typeParameters ?? void 0;
+			value.parameters = params;
+			if (returnType != null) value.typeAnnotation = returnType;
+		}
+		if (value.type === "JSXMemberExpression") value.computed = false;
+		if (value.type === "TSConstructorType") value.abstract ??= false;
+		if (value.type === "TSTypeParameter") {
+			if (value.constraint === null) value.constraint = void 0;
+			if (value.default === null) value.default = void 0;
 		}
 		if (value.type === "TSMappedType" && value.key != null) {
 			const { key, constraint } = value;

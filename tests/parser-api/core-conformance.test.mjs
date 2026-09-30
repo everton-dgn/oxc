@@ -6,7 +6,8 @@ import { parseModule } from "../../packages/tsrx-core-compat/dist/index.js";
 // Regression tests for the @tsrx/core 0.5.0 conformance issues tsrx-org/oxc #110, #112, #113,
 // #114, #115, #116, #117, #118, #125, #127, and #128. Every expected value below is what @tsrx/core 0.5.0 (tsrx main at
 // f78fada) returns for the same source, so a difference here is a difference from the reference
-// parser. The #111, #145, #146, #147, #148, and #149 tests at the end take theirs from @tsrx/core 0.5.2.
+// parser. The #111, #145, #146, #147, #148, and #149 tests, and the shape tests at the end, take
+// theirs from @tsrx/core 0.5.2.
 
 function findAll(root, predicate) {
   const found = [];
@@ -1581,4 +1582,61 @@ test("#149: a member access, call, or `!` after a control-flow expression fails 
   // `!=` is an operator, and a parenthesized control takes a subscript.
   assert.doesNotThrow(() => parseModule("const x = @if (a) {\n\t<p />\n} != 1;", "App.tsrx"));
   assert.doesNotThrow(() => parseModule("const x = (@if (a) {\n\t<p />\n}).length;", "App.tsrx"));
+});
+
+// `undefined` spelled out, so a row tells a key core leaves undefined apart from a null.
+const spelled = (value) => (value === undefined ? "undefined" : value);
+
+test("a signature's and a function type's parameters and return type have core's names", () => {
+  const source = [
+    "interface I {",
+    "\t(a: A): R;",
+    "\tnew (b: B): I;",
+    "\tm?<T extends unknown>(c: T): R;",
+    "\tn();",
+    "}",
+    "type F = (d: D) => R;",
+    "type C = abstract new () => R;",
+    "type G = new () => R;",
+  ].join("\n");
+  const rows = findAll(parseModule(source, "App.tsrx"), (node) => /Signature|FunctionType|ConstructorType/u.test(node.type ?? ""))
+    .sort((left, right) => left.start - right.start)
+    .map((node) => [
+      node.type,
+      node.start,
+      node.end,
+      "typeParameters" in node,
+      node.typeParameters?.params.map(({ name, constraint, default: fallback }) => [name.name, constraint?.type, spelled(fallback)]),
+      node.parameters.map(({ name }) => name),
+      spelled(node.typeAnnotation?.start),
+      spelled(node.abstract),
+      "params" in node || "returnType" in node,
+    ]);
+  assert.deepEqual(rows, [
+    ["TSCallSignatureDeclaration", 15, 25, true, undefined, ["a"], 21, "undefined", false],
+    ["TSConstructSignatureDeclaration", 27, 41, true, undefined, ["b"], 37, "undefined", false],
+    ["TSMethodSignature", 43, 74, true, [["T", "TSUnknownKeyword", "undefined"]], ["c"], 70, "undefined", false],
+    ["TSMethodSignature", 76, 80, true, undefined, [], "undefined", "undefined", false],
+    ["TSFunctionType", 92, 103, true, undefined, ["d"], 99, "undefined", false],
+    ["TSConstructorType", 114, 134, true, undefined, [], 130, true, false],
+    ["TSConstructorType", 145, 156, true, undefined, [], 152, false, false],
+  ]);
+  // A declared function keeps `params` and `returnType`, as it does in core.
+  const declared = parseModule("declare function d(a: A): R;", "App.tsrx").body[0];
+  assert.deepEqual([declared.params.length, declared.returnType.type, "parameters" in declared], [1, "TSTypeAnnotation", false]);
+});
+
+test("a type parameter without a constraint or default leaves both undefined, as core does", () => {
+  const [parameter] = parseModule("type X<P> = P;", "App.tsrx").body[0].typeParameters.params;
+  assert.deepEqual(
+    ["constraint" in parameter, spelled(parameter.constraint), "default" in parameter, spelled(parameter.default)],
+    [true, "undefined", true, "undefined"],
+  );
+});
+
+test("a JSX member name is not computed, as core gives it", () => {
+  const names = findAll(parseModule("const v = <main><UI.List /><a.b.c /></main>;", "App.tsrx"), (node) => node.type === "JSXMemberExpression")
+    .map(({ start, end, computed }) => [start, end, computed])
+    .sort((left, right) => left[0] - right[0] || left[1] - right[1]);
+  assert.deepEqual(names, [[17, 24, false], [28, 31, false], [28, 33, false]]);
 });
