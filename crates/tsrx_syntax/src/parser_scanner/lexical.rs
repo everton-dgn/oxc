@@ -190,24 +190,44 @@ impl Scanner<'_> {
             return false;
         }
 
-        self.type_parameter_list_precedes_parameters(name_end)
+        self.type_list_end(name_end).is_some_and(|end| {
+            self.skip_trivia(end).is_ok_and(|next| self.bytes.get(next) == Some(&b'('))
+        })
     }
 
-    fn type_parameter_list_precedes_parameters(&self, mut index: usize) -> bool {
+    /// True when the `<` at `start` opens the type parameters of a call signature, construct
+    /// signature, or function type: `<P>(props: P): void` or `<P>(props: P) => void`. TSX reads
+    /// the same bytes as an element in expression position, and only a parser that knows it is in
+    /// a type can tell them apart, so the caller asks this only after the markup reading failed.
+    pub(super) fn looks_like_signature_type_parameters(&self, start: usize) -> bool {
+        let Some(list_end) = self.type_list_end(start + 1) else {
+            return false;
+        };
+        let Ok(open) = self.skip_trivia(list_end) else {
+            return false;
+        };
+        if self.bytes.get(open) != Some(&b'(') {
+            return false;
+        }
+        let Some(close) = self.balanced_parameters_end(open) else {
+            return false;
+        };
+        self.skip_trivia(close).is_ok_and(|next| {
+            self.bytes.get(next) == Some(&b':') || self.bytes.get(next..next + 2) == Some(b"=>")
+        })
+    }
+
+    /// The offset after the `>` that closes a type list whose contents begin at `index`, just
+    /// past its `<`. Nested lists count, an arrow's `=>` closes nothing, and a `>` in a string
+    /// or template literal type is text.
+    pub(super) fn type_list_end(&self, mut index: usize) -> Option<usize> {
         let mut depth = 1_u32;
         while let Some(&byte) = self.bytes.get(index) {
             match byte {
-                b'\'' | b'"' => {
-                    let Ok(end) = self.skip_quote(index, byte) else {
-                        return false;
-                    };
-                    index = end;
-                }
+                b'\'' | b'"' => index = self.skip_quote(index, byte).ok()?,
+                b'`' => index = self.skip_template_raw(index, self.bytes.len()).ok()?,
                 b'/' if self.bytes.get(index + 1) == Some(&b'*') => {
-                    let Ok(end) = self.skip_block_comment(index) else {
-                        return false;
-                    };
-                    index = end;
+                    index = self.skip_block_comment(index).ok()?;
                 }
                 b'/' if self.bytes.get(index + 1) == Some(&b'/') => {
                     index = self.skip_line_comment(index + 2);
@@ -220,15 +240,45 @@ impl Scanner<'_> {
                     depth -= 1;
                     index += 1;
                     if depth == 0 {
-                        return self
-                            .skip_trivia(index)
-                            .is_ok_and(|next| self.bytes.get(next) == Some(&b'('));
+                        return Some(index);
                     }
                 }
                 _ => index += 1,
             }
         }
-        false
+        None
+    }
+
+    /// The offset after the `)` that closes the parameter list opened at `start`, counting nested
+    /// brackets of every kind and skipping strings, template literal types, and comments.
+    fn balanced_parameters_end(&self, start: usize) -> Option<usize> {
+        let mut depth = 0_u32;
+        let mut index = start;
+        while let Some(&byte) = self.bytes.get(index) {
+            match byte {
+                b'\'' | b'"' => index = self.skip_quote(index, byte).ok()?,
+                b'`' => index = self.skip_template_raw(index, self.bytes.len()).ok()?,
+                b'/' if self.bytes.get(index + 1) == Some(&b'*') => {
+                    index = self.skip_block_comment(index).ok()?;
+                }
+                b'/' if self.bytes.get(index + 1) == Some(&b'/') => {
+                    index = self.skip_line_comment(index + 2);
+                }
+                b'(' | b'[' | b'{' => {
+                    depth = depth.saturating_add(1);
+                    index += 1;
+                }
+                b')' | b']' | b'}' => {
+                    depth = depth.checked_sub(1)?;
+                    index += 1;
+                    if depth == 0 {
+                        return (byte == b')').then_some(index);
+                    }
+                }
+                _ => index += 1,
+            }
+        }
+        None
     }
 
     pub(super) fn skip_line_comment(&self, mut index: usize) -> usize {

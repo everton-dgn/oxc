@@ -135,6 +135,18 @@ impl Scanner<'_> {
                             closed_control_paren = false;
                             pending_statement_body = false;
                         }
+                        // `<P>(props: P): void` in an interface or a function type is markup
+                        // only to a scanner that cannot see it is in a type. When the markup
+                        // reading fails, the signature's shape hands it to OXC as code.
+                        Err(_) if self.looks_like_signature_type_parameters(index) => {
+                            self.rollback(checkpoint);
+                            index += 1;
+                            can_start_expression = true;
+                            can_start_jsx = false;
+                            pending_control_paren = false;
+                            closed_control_paren = false;
+                            pending_statement_body = false;
+                        }
                         Err(ProjectionError::UnsupportedSyntax { offset, construct }) => {
                             return Err(ProjectionError::UnsupportedSyntax { offset, construct });
                         }

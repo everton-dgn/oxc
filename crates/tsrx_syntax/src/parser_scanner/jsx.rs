@@ -144,6 +144,15 @@ impl Scanner<'_> {
                     construct: "ambiguous `<` expression",
                 });
             }
+            // Type arguments, `<List<string> />`, go to OXC as written, which gives them to the
+            // opening element as its `typeArguments`, as `@tsrx/core` does.
+            if self.bytes.get(index) == Some(&b'<') {
+                index =
+                    self.type_list_end(index + 1).ok_or(ProjectionError::UnterminatedSyntax {
+                        offset: to_u32(start)?,
+                        construct: "JSX opening tag",
+                    })?;
+            }
         }
 
         // The tag as written, for `@tsrx/core`'s `Unclosed tag` message: the name, empty for a
@@ -631,6 +640,13 @@ impl Scanner<'_> {
             return false;
         }
         index = self.skip_jsx_name(index);
+        // A tag's type arguments, `<List<string> />`, sit between its name and what commits it.
+        if self.bytes.get(index) == Some(&b'<') {
+            let Some(end) = self.type_list_end(index + 1) else {
+                return false;
+            };
+            index = end;
+        }
         self.bytes.get(index).is_some_and(|byte| {
             byte.is_ascii_whitespace()
                 || *byte == b'>'

@@ -59,6 +59,15 @@ impl Scanner<'_> {
                     construct: "ambiguous `<` expression",
                 });
             }
+            // Type arguments, `<List<string> />`, go to OXC as written, which gives them to the
+            // opening element as its `typeArguments`, as `@tsrx/core` does.
+            if self.bytes.get(index) == Some(&b'<') {
+                index =
+                    self.type_list_end(index + 1).ok_or(ProjectionError::UnterminatedSyntax {
+                        offset: to_u32(start)?,
+                        construct: "JSX opening tag",
+                    })?;
+            }
         }
 
         let style = !fragment && !dynamic && self.bytes[name_start..name_end] == *b"style";
