@@ -346,7 +346,8 @@ impl Scanner<'_> {
         let next = self.skip_trivia(end)?;
         let byte = |offset: usize| self.bytes.get(next + offset).copied();
         let not_digit = |offset: usize| !byte(offset).is_some_and(|byte| byte.is_ascii_digit());
-        let same_line = !self.bytes[end..next].iter().any(|byte| matches!(byte, b'\n' | b'\r'));
+        let same_line = !(end..next)
+            .any(|position| super::lexical::line_terminator_len(self.bytes, position) != 0);
         let subscript = match byte(0) {
             Some(b'(' | b'[' | b'`') => true,
             Some(b'.') => not_digit(1),
