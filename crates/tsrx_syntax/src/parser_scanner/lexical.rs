@@ -462,9 +462,18 @@ impl Scanner<'_> {
     fn previous_significant_end(&self, mut end: usize) -> usize {
         loop {
             let mut crossed_line_break = false;
-            while end > 0 && self.bytes[end - 1].is_ascii_whitespace() {
-                crossed_line_break |= matches!(self.bytes[end - 1], b'\n' | b'\r');
-                end -= 1;
+            while end > 0 {
+                if self.bytes[end - 1].is_ascii_whitespace() {
+                    crossed_line_break |= matches!(self.bytes[end - 1], b'\n' | b'\r');
+                    end -= 1;
+                } else if end >= 3
+                    && matches!(self.bytes.get(end - 3..end), Some([0xe2, 0x80, 0xa8 | 0xa9]))
+                {
+                    crossed_line_break = true;
+                    end -= 3;
+                } else {
+                    break;
+                }
             }
             // Block comments do not nest, so the nearest preceding `/*` opens this one. A `/*`
             // written inside the comment text would land the walk mid-comment instead, which
@@ -491,10 +500,13 @@ impl Scanner<'_> {
     /// unterminated block comment leaves the line undecidable, and reporting no comment then keeps
     /// the caller from walking back over code it cannot account for.
     fn line_comment_start_before(&self, end: usize) -> Option<usize> {
-        let line_start = self.bytes[..end]
-            .iter()
-            .rposition(|byte| matches!(byte, b'\n' | b'\r'))
-            .map_or(0, |index| index + 1);
+        let line_start = (0..end)
+            .rev()
+            .find_map(|index| {
+                let width = line_terminator_len(self.bytes, index);
+                (width != 0 && index + width <= end).then_some(index + width)
+            })
+            .unwrap_or(0);
         let mut index = line_start;
         while index < end {
             match self.bytes[index] {
@@ -850,7 +862,17 @@ pub(super) fn trim_ascii_end(bytes: &[u8], start: usize, mut end: usize) -> usiz
 }
 
 pub(super) fn previous_significant_byte(bytes: &[u8], before: usize) -> Option<u8> {
-    bytes[..before].iter().rfind(|byte| !byte.is_ascii_whitespace()).copied()
+    let mut end = before;
+    while end > 0 {
+        if end >= 3 && line_terminator_len(bytes, end - 3) == 3 {
+            end -= 3;
+        } else if bytes[end - 1].is_ascii_whitespace() {
+            end -= 1;
+        } else {
+            return Some(bytes[end - 1]);
+        }
+    }
+    None
 }
 
 pub(super) fn unsupported_at_construct(bytes: &[u8], index: usize) -> Option<&'static str> {
