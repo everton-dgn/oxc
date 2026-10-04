@@ -490,6 +490,9 @@ impl Scanner<'_> {
     pub(super) fn at_line_start(&self, index: usize) -> bool {
         let mut cursor = index;
         while cursor > 0 {
+            if cursor >= 3 && super::lexical::line_terminator_len(self.bytes, cursor - 3) == 3 {
+                return true;
+            }
             match self.bytes[cursor - 1] {
                 b'\n' | b'\r' => return true,
                 byte if byte.is_ascii_whitespace() => cursor -= 1,

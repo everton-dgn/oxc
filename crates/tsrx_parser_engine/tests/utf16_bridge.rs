@@ -1142,3 +1142,46 @@ fn release_dense_module_and_diagnostic_scaling_campaign_is_linear() {
     assert_linear_scaling("module", &counts, &module_medians);
     assert_linear_scaling("diagnostic", &counts, &diagnostic_medians);
 }
+
+#[test]
+fn unicode_line_terminators_keep_markup_spans_after_setup() {
+    for newline in ["\n", "\r", "\r\n", "\u{2028}", "\u{2029}"] {
+        for setup in [
+            "const a = '🚀'",
+            "const a = '🚀';",
+            "const a = '🚀' // comment",
+            "const a = '🚀' /* comment */",
+        ] {
+            for tag in ["<div/>", "<{Tag}/>"] {
+                let source = format!("function F() @{{{newline}{setup}{newline}  {tag}{newline}}}");
+                let result = parse_units(&utf16(&source));
+                assert_eq!(
+                    result.status,
+                    ParseCompleteness::Complete,
+                    "{source:?}: {:?}",
+                    result.errors
+                );
+                let tape = result.program();
+                let element = (0..tape.object_count())
+                    .map(|i| RecordIndex::new(u32::try_from(i).unwrap()))
+                    .find(|&o| scalar_field(tape, o, "type") == "\"JSXElement\"")
+                    .expect("render element");
+                let start =
+                    u32::try_from(source[..source.find(tag).unwrap()].encode_utf16().count())
+                        .unwrap();
+                assert_eq!(span(tape, element), (start, start + u32::try_from(tag.len()).unwrap()));
+            }
+        }
+    }
+}
+
+#[test]
+fn unicode_control_expression_after_assignment_is_complete() {
+    for newline in ["\n", "\r\n", "\u{2028}", "\u{2029}"] {
+        let source = format!(
+            "export function F({{ c }}) @{{ const v ={newline}@if (c) {{ <a/> }} @else {{ <b/> }};{newline}<p>{{v}}</p> }}"
+        );
+        let result = parse_units(&utf16(&source));
+        assert_eq!(result.status, ParseCompleteness::Complete, "{source:?}: {:?}", result.errors);
+    }
+}
