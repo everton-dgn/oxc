@@ -227,12 +227,14 @@ impl Scanner<'_> {
                         index += 1;
                         break;
                     }
-                    byte if byte.is_ascii_whitespace() => index += 1,
+                    _ if super::lexical::trivia_whitespace_len(self.bytes, index) != 0 => {
+                        index += super::lexical::trivia_whitespace_len(self.bytes, index);
+                    }
                     _ if self.identifier_start_width(index).is_some() => {
                         expecting_attribute_value = false;
                         index = self.skip_jsx_name(index);
-                        while self.bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
-                            index += 1;
+                        while super::lexical::trivia_whitespace_len(self.bytes, index) != 0 {
+                            index += super::lexical::trivia_whitespace_len(self.bytes, index);
                         }
                         if self.bytes.get(index) == Some(&b'=') {
                             index += 1;
@@ -572,8 +574,8 @@ impl Scanner<'_> {
 
     fn skip_jsx_tag_trivia(&self, mut index: usize) -> Result<usize, ProjectionError> {
         loop {
-            while self.bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
-                index += 1;
+            while super::lexical::trivia_whitespace_len(self.bytes, index) != 0 {
+                index += super::lexical::trivia_whitespace_len(self.bytes, index);
             }
             if self.bytes.get(index..index + 2) == Some(b"/*") {
                 index = self.skip_block_comment(index)?;
@@ -651,7 +653,7 @@ impl Scanner<'_> {
             index = end;
         }
         self.bytes.get(index).is_some_and(|byte| {
-            byte.is_ascii_whitespace()
+            super::lexical::trivia_whitespace_len(self.bytes, index) != 0
                 || *byte == b'>'
                 || (*byte == b'/' && self.bytes.get(index + 1) == Some(&b'*'))
                 || (*byte == b'/' && self.bytes.get(index + 1) == Some(&b'>'))
@@ -770,6 +772,9 @@ impl Scanner<'_> {
 
     fn skip_jsx_name(&self, mut index: usize) -> usize {
         loop {
+            if super::lexical::trivia_whitespace_len(self.bytes, index) != 0 {
+                return index;
+            }
             if let Some(width) = self.identifier_continue_width(index) {
                 index += width;
             } else if self.bytes.get(index).is_some_and(|byte| matches!(byte, b'.' | b':' | b'-')) {

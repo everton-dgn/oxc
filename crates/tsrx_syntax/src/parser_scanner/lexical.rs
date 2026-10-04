@@ -564,7 +564,17 @@ pub(super) fn trim_ascii_end(bytes: &[u8], start: usize, mut end: usize) -> usiz
 }
 
 pub(super) fn previous_significant_byte(bytes: &[u8], before: usize) -> Option<u8> {
-    bytes[..before].iter().rfind(|byte| !byte.is_ascii_whitespace()).copied()
+    let mut end = before;
+    while end > 0 {
+        if end >= 3 && line_terminator_len(bytes, end - 3) == 3 {
+            end -= 3;
+        } else if bytes[end - 1].is_ascii_whitespace() {
+            end -= 1;
+        } else {
+            return Some(bytes[end - 1]);
+        }
+    }
+    None
 }
 
 pub(super) fn unsupported_at_construct(bytes: &[u8], index: usize) -> Option<&'static str> {
