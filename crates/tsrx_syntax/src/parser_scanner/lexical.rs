@@ -6,6 +6,23 @@ use crate::diagnostics::{ProjectionError, to_u32};
 use super::Scanner;
 use super::surrogates::OpaqueSurrogateContext;
 
+/// Width in UTF-8 bytes of an ECMAScript line terminator at this offset.
+pub(super) fn line_terminator_len(bytes: &[u8], index: usize) -> usize {
+    match bytes.get(index) {
+        Some(b'\n' | b'\r') => 1,
+        Some(0xe2) if matches!(bytes.get(index..index + 3), Some([0xe2, 0x80, 0xa8 | 0xa9])) => 3,
+        _ => 0,
+    }
+}
+
+pub(super) fn trivia_whitespace_len(bytes: &[u8], index: usize) -> usize {
+    if bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+        1
+    } else {
+        line_terminator_len(bytes, index)
+    }
+}
+
 impl Scanner<'_> {
     pub(super) fn scan_template(&mut self, start: usize) -> Result<usize, ProjectionError> {
         let mut index = start + 1;
@@ -394,7 +411,7 @@ impl Scanner<'_> {
 
     pub(super) fn skip_line_comment(&self, mut index: usize) -> usize {
         let start = index;
-        while index < self.bytes.len() && !matches!(self.bytes[index], b'\n' | b'\r') {
+        while index < self.bytes.len() && line_terminator_len(self.bytes, index) == 0 {
             index += 1;
         }
         self.mark_surrogates(start, index, OpaqueSurrogateContext::Comment);
@@ -418,8 +435,8 @@ impl Scanner<'_> {
 
     pub(super) fn skip_trivia(&self, mut index: usize) -> Result<usize, ProjectionError> {
         loop {
-            while self.bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
-                index += 1;
+            while trivia_whitespace_len(self.bytes, index) != 0 {
+                index += trivia_whitespace_len(self.bytes, index);
             }
             if self.bytes.get(index..index + 2) == Some(b"//") {
                 index = self.skip_line_comment(index + 2);
