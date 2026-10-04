@@ -668,3 +668,25 @@ fn bare_dynamic_statement_siblings_remain_linear_and_ordered() {
         require_type(tape, pair[1].as_object().expect("semicolon"), "EmptyStatement");
     }
 }
+
+#[test]
+fn setup_without_a_semicolon_before_dynamic_markup_has_authored_spans() {
+    let source = "function F() @{\nconst a = 1\n<{Tag}/>\n}";
+    let result = parse_tsrx(&TsrxParseRequest { source }).unwrap();
+    let tape = result.program();
+    let declaration = (0..tape.object_count())
+        .map(|raw| RecordIndex::new(u32::try_from(raw).unwrap()))
+        .find(|&object| {
+            optional_field(tape, object, "type").and_then(|v| tape.scalar(v))
+                == Some("\"VariableDeclaration\"")
+        })
+        .expect("setup declaration");
+    assert_eq!(
+        span(tape, declaration),
+        (
+            u32::try_from(source.find("const").unwrap()).unwrap(),
+            u32::try_from(source.find("<{Tag}").unwrap()).unwrap(),
+        )
+    );
+    assert_no_scaffold(tape);
+}

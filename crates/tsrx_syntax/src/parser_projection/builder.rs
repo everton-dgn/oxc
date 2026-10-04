@@ -455,10 +455,10 @@ impl<'a> Builder<'a> {
                 {
                     return Err(ProjectionError::StructuralMismatch);
                 }
-                self.copy_to(tag.opening.start as usize)?;
+                self.copy_to(tag.opening.start as usize + 1)?;
                 write!(
                     self.output,
-                    "<{}D{} {}A{}_={{(",
+                    "{}D{} {}A{}_={{(",
                     self.prefix, token.owner, self.prefix, token.owner
                 )
                 .expect("writing to a String cannot fail");

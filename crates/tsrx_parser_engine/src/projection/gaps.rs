@@ -274,7 +274,7 @@ fn add_parser_dynamic_gap(
         .ok_or(TsrxParseError::Unsupported("parser dynamic gap has no owner"))?;
     let (gap, expected) = match token.kind {
         ParserDynamicKind::OpenStart => {
-            (ByteSpan::new(tag.opening.start, tag.expression.start), b"<{".as_slice())
+            (ByteSpan::new(tag.opening.start + 1, tag.expression.start), b"{".as_slice())
         }
         ParserDynamicKind::OpenEnd => {
             (ByteSpan::new(tag.expression.end, tag.opening.end), b"}".as_slice())
