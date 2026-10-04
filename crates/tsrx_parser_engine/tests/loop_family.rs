@@ -460,3 +460,26 @@ fn header_keyword_suffixes_are_rejected_by_engine() {
         }
     }
 }
+
+#[test]
+fn parenthesized_for_annotations_accept_every_line_terminator() {
+    for newline in ["\n", "\r", "\r\n", "\u{2028}", "\u{2029}"] {
+        for annotations in [
+            "\nindex(i);\nkey(item.id)",
+            "\nkey(item.id)",
+            "\nindex/* note */(i);\nkey/* note */(item.id)",
+        ] {
+            let annotations = annotations.replace('\n', newline);
+            let source =
+                format!("const value = @for(const item of items;{annotations}) {{ <div/> }};");
+            let units: Vec<u16> = source.encode_utf16().collect();
+            let result =
+                tsrx_parser_engine::parse_tsrx_utf16(&tsrx_parser_engine::TsrxUtf16ParseRequest {
+                    source: &units,
+                })
+                .unwrap();
+            assert!(result.errors.is_empty(), "{source:?}: {:?}", result.errors);
+            assert_no_scaffold(result.program());
+        }
+    }
+}

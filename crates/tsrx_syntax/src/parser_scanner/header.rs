@@ -7,7 +7,7 @@ use crate::{
 };
 
 use super::Scanner;
-use super::lexical::{trim_ascii_end, trivia_whitespace_len};
+use super::lexical::{keyword_boundary, trim_ascii_end, trivia_whitespace_len};
 use super::stack::TinyStack;
 
 impl Scanner<'_> {
@@ -198,9 +198,10 @@ impl Scanner<'_> {
     }
 
     fn header_keyword_at(&self, index: usize, keyword: &[u8]) -> bool {
+        // Callers already found the annotation start after a semicolon and its whitespace.
         self.bytes.get(index..index + keyword.len()) == Some(keyword)
             && (trivia_whitespace_len(self.bytes, index + keyword.len()) != 0
-                || self.bare_keyword_at(index, keyword))
+                || keyword_boundary(self.bytes, index + keyword.len()))
     }
 
     pub(super) fn analyze_for_header(
