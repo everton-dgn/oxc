@@ -7,8 +7,8 @@ use crate::{
 };
 
 use super::Scanner;
-use super::lexical::{previous_significant_byte, trivia_whitespace_len};
 use super::lexical::unsupported_at_construct;
+use super::lexical::{previous_significant_byte, trivia_whitespace_len};
 use super::stack::TinyStack;
 
 impl Scanner<'_> {

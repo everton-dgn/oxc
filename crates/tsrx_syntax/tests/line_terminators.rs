@@ -208,6 +208,7 @@ fn annotated_for_headers_preserve_line_terminator_parity() {
     for template in [
         "function F() @{ @for(const item of items;\nindex i;\nkey item.id) { <div/> } }",
         "function F() @{ @for(const item of items; index\ni\n; key\nitem.id\n) { <div/> } }",
+        "function F() @{ @for(const item of items;\nkey(item.id)) { <div/> } }",
     ] {
         let overlay = scan_for_parser(template).unwrap();
         let baseline = project_for_parser(template, &overlay).unwrap();

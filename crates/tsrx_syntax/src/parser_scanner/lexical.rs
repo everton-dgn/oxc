@@ -922,7 +922,7 @@ pub(super) fn identifier_continue_width(bytes: &[u8], index: usize) -> Option<us
 /// loop header. The base scanner decodes the escape for exactly this reason, and the parser lane
 /// has to agree with it, or format and lint reject a decorator the parser accepts.
 #[inline]
-fn keyword_boundary(bytes: &[u8], index: usize) -> bool {
+pub(super) fn keyword_boundary(bytes: &[u8], index: usize) -> bool {
     if identifier_continue_width(bytes, index).is_some() {
         return false;
     }
