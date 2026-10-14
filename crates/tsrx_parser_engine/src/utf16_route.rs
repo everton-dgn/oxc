@@ -369,7 +369,7 @@ mod tests {
 
         let result = parse_tsrx_utf16(&TsrxUtf16ParseRequest { source: &source })
             .expect("structured rejection");
-        assert!(result.rejection_module_names.spans().is_empty());
+        assert_eq!(result.rejection_module_names.spans(), []);
         let debug = format!("{result:?}");
         assert!(!debug.contains('\u{e000}'));
         assert!(!debug.contains('\u{ffff}'));

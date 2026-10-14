@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-09-19T04:54:20.452Z",
+  "generatedAt": "2026-10-14T18:20:32.325Z",
   "host": {
     "platform": "darwin",
     "architecture": "arm64",
@@ -9,31 +9,31 @@
   },
   "native": {
     "packageName": "@tsrx/oxc-darwin-arm64",
-    "version": "0.13.0",
+    "version": "0.20.0",
     "target": "aarch64-apple-darwin",
     "oxcRevision": "5a6e37e5cf895143a5b34050c50109c46e2ae96a",
-    "integrity": "sha512-tdxHiEJ5BZQXGiktBW4V7AO9iArVPrDjrYczELQCw7vS7KQDiIbG6+LYqffxb4QEUnoQPw1ppJQb0ypfWsBcbw==",
-    "shasum": "b7d7d11ca907aeeade4dbeed9994e52744b231bd"
+    "integrity": "sha512-Q6Mrj+QzY5g8k1gLMzOMlWvjfEzXxtrTOSY6MONsrkMBLXCWP1NRpBi+QC9hFHLZG1AHYGomT/NOVi373uhnNw==",
+    "shasum": "14084619bd3462d3c4290fef098015f3b127d0a2"
   },
   "policy": {
     "legacy": "0.1.20 isolated opt-in control; not supported for new installs",
-    "minimum": "0.1.24",
-    "current": "0.2.4",
+    "minimum": "0.3.2",
+    "current": "0.3.3",
     "next": "advisory only until published and separately qualified"
   },
   "lanes": [
     {
       "lane": "minimum",
       "vitePlus": {
-        "version": "0.1.24",
-        "core": "0.1.24",
-        "bundledOxlint": "=1.67.0",
-        "bundledOxfmt": "=0.52.0",
-        "bundledTsgolint": "=0.23.0"
+        "version": "0.3.2",
+        "core": "0.3.2",
+        "bundledOxlint": "=1.82.0",
+        "bundledOxfmt": "=0.67.0",
+        "bundledTsgolint": "=7.0.2001"
       },
       "companions": {
         "provider": "oxc-tsrx",
-        "providerVersion": "0.13.0",
+        "providerVersion": "0.20.0",
         "delegatedOxlint": "1.83.0",
         "delegatedOxfmt": "0.68.0"
       },
@@ -60,15 +60,15 @@
     {
       "lane": "current",
       "vitePlus": {
-        "version": "0.2.4",
-        "core": "0.2.4",
-        "bundledOxlint": "=1.72.0",
-        "bundledOxfmt": "=0.57.0",
-        "bundledTsgolint": "=0.24.0"
+        "version": "0.3.3",
+        "core": "0.3.3",
+        "bundledOxlint": "=1.83.0",
+        "bundledOxfmt": "=0.68.0",
+        "bundledTsgolint": "=7.0.2001"
       },
       "companions": {
         "provider": "oxc-tsrx",
-        "providerVersion": "0.13.0",
+        "providerVersion": "0.20.0",
         "delegatedOxlint": "1.83.0",
         "delegatedOxfmt": "0.68.0"
       },
@@ -84,10 +84,10 @@
         "audit": {
           "info": 0,
           "low": 0,
-          "moderate": 5,
+          "moderate": 0,
           "high": 0,
           "critical": 0,
-          "total": 5
+          "total": 0
         },
         "environmentOverrides": false
       }

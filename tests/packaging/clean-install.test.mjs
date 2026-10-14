@@ -128,7 +128,7 @@ test("untouched tarballs run the complete supported workflow from an empty consu
     type: "module",
     dependencies: {
       "@tsrx/oxc": "0.20.0",
-      "vite-plus": "0.2.4",
+      "vite-plus": "0.3.3",
     },
   };
   await writeFile(join(consumer, "package.json"), `${JSON.stringify(packageJson, null, 2)}\n`);

@@ -64,7 +64,7 @@ pub fn program_body(tape: &FlatTape) -> Vec<ValueRef> {
 
 pub fn assert_empty_path(tape: &FlatTape, object: RecordIndex) {
     let metadata = object_field(tape, object, "metadata");
-    assert!(list_field(tape, metadata, "path").is_empty());
+    assert_eq!(list_field(tape, metadata, "path"), [] as [tsrx_tape_schema::ValueRef; 0]);
 }
 
 pub fn assert_no_scaffold(tape: &FlatTape) {

@@ -147,7 +147,10 @@ fn editor_recovery_completes_common_in_progress_tsrx_snapshots() {
 
         let recovered = recover(source);
         assert_recovered(&recovered, source);
-        assert!(!program_body(recovered.program.as_ref().expect("recovered Program")).is_empty());
+        assert_ne!(
+            program_body(recovered.program.as_ref().expect("recovered Program")),
+            [] as [tsrx_tape_schema::ValueRef; 0]
+        );
         assert!(recovered.errors.records().iter().all(|diagnostic| {
             recovered
                 .errors

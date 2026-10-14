@@ -173,5 +173,5 @@ jobs:
           {
             printf '## Vite+ 0.1.20 legacy control\n\n'
             printf -- '- Result: `%s`\n' '${{ steps.legacy.outcome }}'
-            printf -- '- Policy: non-blocking and unsupported for new installs; 0.1.24 is the minimum supported release.\n'
+            printf -- '- Policy: non-blocking and unsupported for new installs; 0.3.2 is the minimum supported release.\n'
           } >> "$GITHUB_STEP_SUMMARY"

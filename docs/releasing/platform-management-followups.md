@@ -147,7 +147,7 @@ One literal is baked into a **job display name**:
 
 ```yaml
 # .github/workflows/ci.yml:255
-name: Clean install / Vite+ 0.1.24 and 0.2.4
+name: Clean install / Vite+ 0.3.2 and 0.3.3
 ```
 
 **Why it matters.** A toolchain bump is a find-and-replace across five files

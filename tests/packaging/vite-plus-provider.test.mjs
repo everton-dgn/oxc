@@ -6,7 +6,7 @@
  * because it resolves the `oxlint` package, joins `bin/oxlint`, and executes
  * whatever it finds. Until now that was checked by re-implementing its rule
  * in a scratch script. This file checks it by running the real
- * `vite-plus-current` 0.2.4 binary that is already installed in this repository
+ * `vite-plus-current` 0.3.3 binary that is already installed in this repository
  * and recording where it actually lands.
  *
  * Nothing here is a stand-in for Vite+. The one thing the fixture supplies is
@@ -16,8 +16,8 @@
  * the position a patched wrapper would occupy, and it keeps the test about
  * Vite+'s behaviour rather than about Oxlint's.
  *
- * The finding this file exists to make honest: installed Vite+ 0.2.4 pins
- * `"oxlint": "=1.72.0"` exactly. See the last test for what that costs.
+ * The finding this file exists to make honest: installed Vite+ 0.3.3 pins
+ * `"oxlint": "=1.83.0"` exactly. See the last test for what that costs.
  *
  * No network. Every package comes from the workspace install.
  */
@@ -44,12 +44,12 @@ import test from "node:test";
 const root = resolve(import.meta.dirname, "../..");
 const require = createRequire(join(root, "package.json"));
 
-/** The installed Vite+ under test. Aliased in tests/package.json to vite-plus@0.2.4. */
+/** The installed Vite+ under test. Aliased in tests/package.json to vite-plus@0.3.3. */
 const VITE_PLUS_PACKAGE = "vite-plus-current";
-const VITE_PLUS_VERSION = "0.2.4";
+const VITE_PLUS_VERSION = "0.3.3";
 
-/** The version Vite+ 0.2.4 pins exactly, and therefore the only one it ships with. */
-const PINNED_OXLINT = "1.72.0";
+/** The version Vite+ 0.3.3 pins exactly, and therefore the only one it ships with. */
+const PINNED_OXLINT = "1.83.0";
 /** The version the locally built dispatch patch was compiled at. */
 const PATCHED_OXLINT = "1.74.0";
 
@@ -324,20 +324,20 @@ async function runVitePlusLspWrapper({ project, shim, probeLog }) {
   return { ...result, probe: await readProbe(probeLog) };
 }
 
-test("installed Vite+ 0.2.4 pins oxlint to exactly =1.72.0, which bounds the zero-line claim", async () => {
+test("installed Vite+ 0.3.3 pins oxlint to exactly =1.83.0, which bounds the zero-line claim", async () => {
   const manifest = JSON.parse(
     await readFile(join(await packageRoot(require, VITE_PLUS_PACKAGE), "package.json"), "utf8"),
   );
   assert.equal(manifest.name, "vite-plus");
   assert.equal(manifest.version, VITE_PLUS_VERSION);
 
-  // The exact pin is the whole caveat. `=1.72.0` accepts one version and no
-  // other, so the Oxlint copy Vite+ 0.2.4 installs for itself can never be a
+  // The exact pin is the whole caveat. `=1.83.0` accepts one version and no
+  // other, so the Oxlint copy Vite+ 0.3.3 installs for itself can never be a
   // build carrying provider dispatch, which exists only at 1.74.0 and only as a
   // local build. "Zero lines" is a statement about Vite+'s code, not a claim
   // that a released Vite+ can pick up a patched wrapper today.
   assert.equal(manifest.dependencies.oxlint, `=${PINNED_OXLINT}`);
-  assert.equal(manifest.dependencies.oxfmt, "=0.57.0");
+  assert.equal(manifest.dependencies.oxfmt, "=0.68.0");
   assert.notEqual(PINNED_OXLINT, PATCHED_OXLINT);
 });
 
@@ -419,7 +419,7 @@ test(
   async (t) => {
     const fixture = await makeProject({ projectOxlint: false, nestedOxlint: true });
     try {
-      await t.test("vp lint lands on the =1.72.0 copy Vite+ installed for itself", async () => {
+      await t.test("vp lint lands on the =1.83.0 copy Vite+ installed for itself", async () => {
         const result = await runVp(fixture, ["lint", "src/main.ts", "src/Widget.wdgt"]);
         assert.equal(result.probe.length, 1, result.stderr || result.stdout);
         const [record] = result.probe;

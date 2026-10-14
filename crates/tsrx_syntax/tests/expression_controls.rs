@@ -29,7 +29,7 @@ fn the_wrapper_of_an_expression_control_stands_for_the_controls_ends() {
 fn a_statement_or_jsx_child_control_has_no_wrapper_anchor() {
     let source = "function App() @{\n\t@if (x) {\n\t\t<p>{y}</p>\n\t}\n\t<div>@for (const z of w) {\n\t\t<i />\n\t}</div>\n}";
     let overlay = scan_for_parser(source).unwrap();
-    assert!(project_for_parser(source, &overlay).unwrap().anchors().is_empty());
+    assert_eq!(project_for_parser(source, &overlay).unwrap().anchors(), []);
 }
 
 #[test]
