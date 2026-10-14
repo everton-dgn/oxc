@@ -298,7 +298,7 @@ impl<'a> ProgramSerializer<'a> {
     fn into_payload<const RESERVED: bool>(mut self) -> Result<String, TapeBuildError> {
         self.push_node_str::<RESERVED>(",\"fixes\":[")?;
         if RESERVED {
-            debug_assert!(self.fixes.value.is_empty());
+            debug_assert_eq!(self.fixes.value, "");
         }
         let fixes = std::mem::take(&mut self.fixes.value);
         self.push_node_str::<RESERVED>(&fixes)?;

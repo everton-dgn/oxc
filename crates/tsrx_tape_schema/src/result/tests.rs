@@ -540,7 +540,7 @@ fn destructive_parts_release_every_source_allocation() {
     let dynamics = module.take_dynamic_imports();
     let metas = module.take_import_metas();
     let module_strings = module.take_string_storage().expect("UTF-8 module strings");
-    assert!(!module_strings.is_empty());
+    assert_ne!(module_strings, "");
     assert!(imports.0.capacity() > 0 && imports.1.capacity() > 0);
     assert!(exports.0.capacity() > 0 && exports.1.capacity() > 0);
     assert!(dynamics.capacity() > 0 && metas.capacity() > 0);

@@ -450,6 +450,6 @@ mod tests {
                 .err()
                 .expect("invalid JSON must fail before linting")
                 .to_string();
-        assert!(!error.is_empty());
+        assert_ne!(error, "");
     }
 }

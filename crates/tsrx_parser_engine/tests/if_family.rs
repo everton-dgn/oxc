@@ -161,7 +161,7 @@ fn promotes_a_terminal_statement_if_to_code_block_render() {
     let function = one_object(&program_body(tape));
     let code_block = object_field(tape, function, "body");
     require_type(tape, code_block, "JSXCodeBlock");
-    assert!(list_field(tape, code_block, "body").is_empty());
+    assert_eq!(list_field(tape, code_block, "body"), [] as [tsrx_tape_schema::ValueRef; 0]);
     let if_node = object_field(tape, code_block, "render");
     assert_if_head(tape, if_node, (19, 40), (24, 26));
     assert_no_scaffold(tape);

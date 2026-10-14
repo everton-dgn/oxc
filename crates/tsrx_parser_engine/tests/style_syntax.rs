@@ -128,7 +128,7 @@ fn assert_style_self(
     assert_eq!(scalar_field(tape, opening, "selfClosing"), "true");
     assert_eq!(attribute_names(tape, style), attributes);
     assert_eq!(apply_expression_type(tape, style).as_deref(), apply);
-    assert!(list_field(tape, style, "children").is_empty());
+    assert_eq!(list_field(tape, style, "children"), [] as [tsrx_tape_schema::ValueRef; 0]);
     assert_eq!(scalar_field(tape, style, "css"), "\"\"");
     assert_eq!(tape.scalar(field(tape, style, "closingElement")), Some("null"));
     let metadata = object_field(tape, style, "metadata");
@@ -295,7 +295,7 @@ fn lone_style_in_code_block_parses_as_render() {
     assert_no_parser_errors(&result);
     let tape = tape_of(&result);
     let block = component_block(tape);
-    assert!(code_block_body(tape, block).is_empty());
+    assert_eq!(code_block_body(tape, block), [] as [tsrx_tape_schema::RecordIndex; 0]);
     assert_style_body(tape, object_field(tape, block, "render"), CSS, &[], None);
     assert_no_scaffold(tape);
 }
@@ -329,7 +329,7 @@ fn nested_code_block_keeps_its_own_style_inside_a_fragment() {
     let div_children = objects(&list_field(tape, children[1], "children"));
     let nested = div_children[0];
     require_type(tape, nested, "JSXCodeBlock");
-    assert!(code_block_body(tape, nested).is_empty());
+    assert_eq!(code_block_body(tape, nested), [] as [tsrx_tape_schema::RecordIndex; 0]);
     let nested_render = object_field(tape, nested, "render");
     require_type(tape, nested_render, "JSXFragment");
     let nested_children = objects(&list_field(tape, nested_render, "children"));

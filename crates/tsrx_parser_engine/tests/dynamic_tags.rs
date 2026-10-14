@@ -74,7 +74,7 @@ fn reconstructs_self_closing_dynamic_tag_with_exact_canonical_shape() {
         ]
     );
     assert_empty_path(tape, element);
-    assert!(list_field(tape, element, "children").is_empty());
+    assert_eq!(list_field(tape, element, "children"), [] as [tsrx_tape_schema::ValueRef; 0]);
     assert_eq!(scalar_field(tape, element, "isDynamic"), "true");
     assert_eq!(tape.scalar(field(tape, element, "closingElement")), Some("null"));
 
@@ -85,7 +85,7 @@ fn reconstructs_self_closing_dynamic_tag_with_exact_canonical_shape() {
         field_names(tape, opening),
         ["type", "start", "end", "attributes", "name", "isDynamic", "selfClosing",]
     );
-    assert!(list_field(tape, opening, "attributes").is_empty());
+    assert_eq!(list_field(tape, opening, "attributes"), [] as [tsrx_tape_schema::ValueRef; 0]);
     assert_eq!(scalar_field(tape, opening, "isDynamic"), "true");
     assert_eq!(scalar_field(tape, opening, "selfClosing"), "true");
     let expression = assert_dynamic_name(tape, name, (13, 18), "Identifier", (14, 17));
@@ -672,7 +672,7 @@ fn terminal_function_render_discards_its_optional_semicolon() {
         let function = one_object(&program_body(tape));
         let block = object_field(tape, function, "body");
         require_type(tape, block, "JSXCodeBlock");
-        assert!(list_field(tape, block, "body").is_empty());
+        assert_eq!(list_field(tape, block, "body"), [] as [tsrx_tape_schema::ValueRef; 0]);
         let render = object_field(tape, block, "render");
         require_type(tape, render, "JSXElement");
         assert_eq!(span(tape, render), (19, 27));
@@ -767,7 +767,7 @@ fn bare_dynamic_statement_siblings_remain_linear_and_ordered() {
     let body = list_field(tape, block, "body");
     assert_eq!(body.len(), 512);
     let (pairs, remainder) = body.as_chunks::<2>();
-    assert!(remainder.is_empty());
+    assert_eq!(remainder, []);
     for pair in pairs {
         require_type(tape, pair[0].as_object().expect("dynamic"), "JSXElement");
         require_type(tape, pair[1].as_object().expect("semicolon"), "EmptyStatement");

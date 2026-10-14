@@ -92,7 +92,7 @@ const OBSERVER_COUNTERS: [&AtomicU64; 8] = [
 
 #[cfg(feature = "stage4-observer")]
 fn saturating_counter_add(counter: &AtomicU64, value: u64) {
-    let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+    let _ = counter.try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
         Some(current.saturating_add(value).min(JS_MAX_SAFE_INTEGER))
     });
 }

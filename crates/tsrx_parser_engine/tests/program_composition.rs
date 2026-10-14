@@ -215,7 +215,10 @@ fn script_payloads_remain_raw_text_through_the_oxc_parse() {
         r#""{\"nested\":{\"enabled\":true},\"boundary\":\"</ScRiPt>\"}""#,
     );
     // Like `@tsrx/core` 0.5 (tsrx-org/tsrx#790), the body lives only on `content`.
-    assert!(list_field(result.program(), element, "children").is_empty());
+    assert_eq!(
+        list_field(result.program(), element, "children"),
+        [] as [tsrx_tape_schema::ValueRef; 0]
+    );
     let content_end = source.find("</script>").expect("closing script");
     let closing = object_field(result.program(), element, "closingElement");
     assert_eq!(span(result.program(), closing), (offset(content_end), offset(source.len() - 2)));
@@ -879,7 +882,7 @@ fn nested_code_blocks_follow_their_completed_owner_policies() {
     assert_eq!(span(tape, outer_block), (17, 31));
     assert_eq!(span(tape, inner), (20, 29));
     require_type(tape, rendered(tape, inner), "JSXElement");
-    assert!(list_field(tape, outer_block, "body").is_empty());
+    assert_eq!(list_field(tape, outer_block, "body"), [] as [tsrx_tape_schema::ValueRef; 0]);
     assert_no_scaffold(tape);
 
     for (source, family, child_field) in [

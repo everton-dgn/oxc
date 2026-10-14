@@ -137,7 +137,7 @@ fn preserves_empty_switches_and_empty_case_consequents() {
     let declarator = one_object(&list_field(empty.program(), declaration, "declarations"));
     let switch = object_field(empty.program(), declarator, "init");
     assert_switch_head(empty.program(), switch, (8, 23), (16, 20));
-    assert!(cases(empty.program(), switch).is_empty());
+    assert_eq!(cases(empty.program(), switch), [] as [tsrx_tape_schema::RecordIndex; 0]);
     assert_no_scaffold(empty.program());
 
     let empty_case = parse_tsrx(&TsrxParseRequest { source: "const x=@switch(kind){@case 1:{}};" })
@@ -147,7 +147,10 @@ fn preserves_empty_switches_and_empty_case_consequents() {
     let switch = object_field(empty_case.program(), declarator, "init");
     assert_switch_head(empty_case.program(), switch, (8, 33), (16, 20));
     let case = one_object_value(&cases(empty_case.program(), switch));
-    assert!(assert_case(empty_case.program(), case, (22, 32), Some((28, 29))).is_empty());
+    assert_eq!(
+        assert_case(empty_case.program(), case, (22, 32), Some((28, 29))),
+        [] as [tsrx_tape_schema::RecordIndex; 0]
+    );
     assert_no_scaffold(empty_case.program());
 }
 
@@ -181,7 +184,7 @@ fn promotes_a_terminal_statement_switch_to_code_block_render() {
     let function = one_object(&program_body(tape));
     let code_block = object_field(tape, function, "body");
     require_type(tape, code_block, "JSXCodeBlock");
-    assert!(list_field(tape, code_block, "body").is_empty());
+    assert_eq!(list_field(tape, code_block, "body"), [] as [tsrx_tape_schema::ValueRef; 0]);
     let switch = object_field(tape, code_block, "render");
     assert_switch_head(tape, switch, (19, 63), (27, 31));
     let cases = cases(tape, switch);

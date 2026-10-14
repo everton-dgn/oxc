@@ -708,7 +708,7 @@ fn jsx_text_comments_are_scanned_before_tags_and_braces() {
         .map(|span| &source[span.start as usize..span.end as usize])
         .collect::<Vec<_>>();
     assert_eq!(comments, ["/* { */", "// c", "// <b>x</b>", "// d", "/* e */"]);
-    assert!(overlay.implicit_closes().is_empty());
+    assert_eq!(overlay.implicit_closes(), []);
 
     // A comment that swallows a closing tag leaves its element to end at the `}` that closes
     // the template, which the parse reports as unclosed.

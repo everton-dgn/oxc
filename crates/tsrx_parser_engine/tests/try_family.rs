@@ -255,13 +255,16 @@ fn preserves_empty_try_family_blocks() {
         let declaration = one_object(&program_body(tape));
         let declarator = one_object(&list_field(tape, declaration, "declarations"));
         let node = object_field(tape, declarator, "init");
-        assert!(list_field(tape, object_field(tape, node, "block"), "body").is_empty());
+        assert_eq!(
+            list_field(tape, object_field(tape, node, "block"), "body"),
+            [] as [tsrx_tape_schema::ValueRef; 0]
+        );
         if let Some(pending) = nullable_object(tape, node, "pending") {
-            assert!(list_field(tape, pending, "body").is_empty());
+            assert_eq!(list_field(tape, pending, "body"), [] as [tsrx_tape_schema::ValueRef; 0]);
         }
         if let Some(handler) = nullable_object(tape, node, "handler") {
             let body = object_field(tape, handler, "body");
-            assert!(list_field(tape, body, "body").is_empty());
+            assert_eq!(list_field(tape, body, "body"), [] as [tsrx_tape_schema::ValueRef; 0]);
         }
         assert_no_scaffold(tape);
     }
@@ -338,7 +341,7 @@ fn promotes_a_terminal_statement_try_to_code_block_render() {
     let tape = result.program();
     let function = one_object(&program_body(tape));
     let code_block = object_field(tape, function, "body");
-    assert!(list_field(tape, code_block, "body").is_empty());
+    assert_eq!(list_field(tape, code_block, "body"), [] as [tsrx_tape_schema::ValueRef; 0]);
     let node = object_field(tape, code_block, "render");
     assert_try_head(tape, node, (19, 69), (23, 29));
     assert_no_scaffold(tape);

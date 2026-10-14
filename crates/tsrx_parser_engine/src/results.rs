@@ -594,8 +594,8 @@ mod tests {
         let (authored, suppressed) = reconstruct_module(synthetic, &segments, overlay.view())
             .expect("synthetic suppression");
         assert_eq!(suppressed, 2);
-        assert!(authored.dynamic_imports().is_empty());
-        assert!(authored.import_metas().is_empty());
+        assert_eq!(authored.dynamic_imports(), []);
+        assert_eq!(authored.import_metas(), []);
         assert!(!authored.has_module_syntax());
 
         let mut mixed = ModuleTable::new();
