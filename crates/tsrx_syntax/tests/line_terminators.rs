@@ -1,4 +1,4 @@
-use tsrx_syntax::{project_for_parser, scan_for_parser};
+use tsrx_syntax::{ProjectionError, project_for_parser, project_for_types, scan_for_parser};
 
 #[test]
 fn line_terminators_separate_setup_from_markup_without_changing_authored_bytes() {
@@ -47,6 +47,25 @@ fn unicode_terminators_do_not_rewrite_literals_or_create_expression_boundaries()
             let overlay = scan_for_parser(&expression).unwrap();
             let projection = project_for_parser(&expression, &overlay).unwrap();
             assert_eq!(projection.source(), expression);
+        }
+    }
+}
+
+#[test]
+fn every_line_terminator_ends_an_unterminated_regex_literal() {
+    for newline in ["\n", "\r", "\r\n", "\u{2028}", "\u{2029}"] {
+        for regex in [format!("/a{newline}b/"), format!("/[a{newline}]/")] {
+            let source = format!("const r = {regex};");
+            assert!(
+                matches!(
+                    scan_for_parser(&source),
+                    Err(ProjectionError::UnterminatedSyntax {
+                        construct: "regular expression literal",
+                        ..
+                    })
+                ),
+                "{source:?}"
+            );
         }
     }
 }
@@ -320,6 +339,29 @@ fn header_keyword_suffixes_remain_unannotated() {
             assert!(
                 projection.source().contains(&format!("{left} of items; {tail}")),
                 "{source:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn parenthesized_index_names_skip_every_line_terminator_in_the_type_lane() {
+    for newline in ["\n", "\r", "\r\n", "\u{2028}", "\u{2029}"] {
+        for value in [
+            format!("({newline}i{newline})"),
+            format!("( // note{newline} i)"),
+            format!("({newline}/* note */{newline}i)"),
+        ] {
+            let source = format!(
+                "function F() @{{ @for (const item of items; index {value}) {{ <div/> }} }}"
+            );
+            let overlay = scan_for_parser(&source).unwrap();
+            let projection = project_for_types(&source, &overlay)
+                .unwrap_or_else(|error| panic!("{source:?}: {error}"));
+            assert!(
+                projection.source().contains("let i = 0;"),
+                "index name not projected for {source:?}: {}",
+                projection.source()
             );
         }
     }

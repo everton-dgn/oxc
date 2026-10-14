@@ -159,7 +159,8 @@ impl Scanner<'_> {
                     index += width;
                 }
                 return Ok(index);
-            } else if matches!(byte, b'\n' | b'\r') {
+            } else if line_terminator_len(self.bytes, index) != 0 {
+                // Unlike string literals, a regex body takes no U+2028 or U+2029 either.
                 break;
             }
             index += 1;
