@@ -291,7 +291,7 @@ test("the @tsrx/oxc lint bridge enables type awareness from resolved Vite+ confi
       OXLINT_TSGOLINT_PATH: tsgolint,
       NODE_PATH: [modules, join(root, "node_modules")].join(delimiter),
       VP_COMMAND: "lint",
-      VP_VERSION: "0.2.4",
+      VP_VERSION: "0.3.3",
     },
     join(modules, "oxlint/bin/oxlint"),
   );
@@ -384,7 +384,7 @@ export default {
       OXLINT_TSGOLINT_PATH: tsgolint,
       NODE_PATH: [modules, join(root, "node_modules")].join(delimiter),
       VP_COMMAND: "lint",
-      VP_VERSION: "0.2.4",
+      VP_VERSION: "0.3.3",
     },
     join(modules, "oxlint/bin/oxlint"),
   );

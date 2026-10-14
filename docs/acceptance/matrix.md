@@ -29,6 +29,12 @@ Neither run publishes or deploys anything.
 | Non-fork OXC architecture | The package boundary suite proved one exact canonical OXC adapter revision and rejected Cargo patches, vendor trees, copied OXC crates, and adapter bypasses. | Successful `package/non-fork/legal artifact matrix` command; `matrix.versions.oxcRevision` = `5a6e37e5cf895143a5b34050c50109c46e2ae96a` |
 | Legal and release artifacts | Locked inventories verified 205 Rust and 12 bundled VS Code dependencies; host packages and the VSIX passed artifact checks. | Successful `locked legal inventories` and package/non-fork/legal matrix commands |
 
+The Vite+ row records the 2026-07-16 run. On 2026-10-14 the supported lanes
+moved to Vite+ 0.3.2 and 0.3.3, because every release up to 0.3.1 carries the
+critical advisory GHSA-g8mr-85jm-7xhm. The current lane proof is
+[`vite-plus-matrix-report.json`](../../tests/packaging/vite-plus-matrix-report.json).
+The clean-room report predates the change.
+
 Every boolean under `matrix.claims`, `matrix.packagedConsumer.assertions`, and
 `matrix.editor.assertions` is `true`. Both supported Vite+ lanes have
 `proof.supported: true` and every performance lane below has

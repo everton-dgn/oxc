@@ -8,7 +8,7 @@
  * `oxfmt` package names. The provider-discovery route, where Vite+ is asked to
  * reach a wrapper it did not install, is a separate lane in
  * tests/packaging/vite-plus-provider.test.mjs. That lane also records the
- * `"oxlint": "=1.72.0"` exact pin that bounds what Vite+ 0.2.4 can resolve.
+ * `"oxlint": "=1.83.0"` exact pin that bounds what Vite+ 0.3.3 can resolve.
  */
 
 import assert from "node:assert/strict";
@@ -27,8 +27,8 @@ import { startLocalRegistry } from "./local-registry.mjs";
 const root = resolve(import.meta.dirname, "../..");
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
 const supportedLanes = [
-  { name: "minimum", vitePlusVersion: "0.1.24" },
-  { name: "current", vitePlusVersion: "0.2.4" },
+  { name: "minimum", vitePlusVersion: "0.3.2" },
+  { name: "current", vitePlusVersion: "0.3.3" },
 ];
 const legacyLane = { name: "legacy", vitePlusVersion: "0.1.20" };
 const legacyMode = process.env.OXC_TSRX_VITE_PLUS_LEGACY;
@@ -464,7 +464,10 @@ export default {
       lane: lane.name,
       vitePlus: {
         version: vitePlus.version,
-        core: vitePlus.dependencies?.["@voidzero-dev/vite-plus-core"],
+        // Vite+ 0.3 depends on its core through the `vite` alias instead of by name.
+        core:
+          vitePlus.dependencies?.["@voidzero-dev/vite-plus-core"] ??
+          vitePlus.dependencies?.vite?.replace(/^npm:@voidzero-dev\/vite-plus-core@/u, ""),
         bundledOxlint: vitePlus.dependencies?.oxlint,
         bundledOxfmt: vitePlus.dependencies?.oxfmt,
         bundledTsgolint: vitePlus.dependencies?.["oxlint-tsgolint"],
@@ -558,8 +561,8 @@ test(
         },
         policy: {
           legacy: "0.1.20 isolated opt-in control; not supported for new installs",
-          minimum: "0.1.24",
-          current: "0.2.4",
+          minimum: "0.3.2",
+          current: "0.3.3",
           next: "advisory only until published and separately qualified",
         },
         lanes: results,

@@ -29,7 +29,7 @@ import { startLocalRegistry } from "./local-registry.mjs";
  * project pinned does, and depend on which package won the `.bin` race.
  *
  * Measured limits this file pins deliberately, so a change to either is visible:
- *   - Vite+ 0.2.4 resolves the *package* named `oxlint`, which a bin cannot
+ *   - Vite+ 0.3.3 resolves the *package* named `oxlint`, which a bin cannot
  *     satisfy, so `vp lint` and `vp check` never see `.tsrx`. They keep working
  *     for ordinary files. Reaching `.tsrx` through Vite+ needs the
  *     `oxc-tsrx setup` compatibility bridge; nothing this package ships in an
@@ -45,7 +45,7 @@ const pnpm = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
 /** Public releases the collision cases pin, so the drift is a real one. */
 const OFFICIAL_OXLINT = "1.72.0";
 const OFFICIAL_OXFMT = "0.44.0";
-const VITE_PLUS = "0.2.4";
+const VITE_PLUS = "0.3.3";
 
 function hostTarget() {
   if (process.platform === "darwin") {
@@ -527,7 +527,7 @@ test(
         assert.doesNotMatch(
           vpLintOutput,
           /View\.tsrx/u,
-          "measured limit: Vite+ 0.2.4 silently skips .tsrx without the compatibility bridge",
+          "measured limit: Vite+ 0.3.3 silently skips .tsrx without the compatibility bridge",
         );
 
         const vpCheck = await run(bin("vp"), ["check", "View.tsrx", "ordinary.tsx"], {

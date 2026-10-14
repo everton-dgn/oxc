@@ -16,7 +16,7 @@ test('both supported physical Vite+ consumers prove build and dev through the fr
   )
   assert.deepEqual(
     report.lanes.map((lane) => lane.vitePlus.version),
-    ['0.1.24', '0.2.4'],
+    ['0.3.2', '0.3.3'],
   )
   for (const lane of report.lanes) {
     assert.equal(lane.proof.viteBuild, true, `${lane.lane}: vp build`)
