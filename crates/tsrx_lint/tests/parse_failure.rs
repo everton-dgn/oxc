@@ -56,7 +56,7 @@ fn an_unparsable_file_is_a_named_positioned_error_and_the_batch_continues() {
         LintError::Unparsed(unparsed) => {
             assert!(unparsed.path.ends_with("probe.tsrx"));
             assert_eq!(unparsed.headline, "OXC parse failed");
-            assert!(!unparsed.diagnostics.is_empty());
+            assert_ne!(unparsed.diagnostics.len(), 0, "{:?}", unparsed.diagnostics);
         }
         other => panic!("expected Unparsed, got {other:?}"),
     }

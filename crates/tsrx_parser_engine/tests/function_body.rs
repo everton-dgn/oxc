@@ -96,7 +96,7 @@ fn reconstructs_a_simple_authored_function_body_as_jsx_code_block() {
     assert_eq!(span(tape, render), (render_start, render_start + offset("<main>{x}</main>".len())));
 
     let metadata = object_field(tape, code_block, "metadata");
-    assert!(list_field(tape, metadata, "path").is_empty());
+    assert_eq!(list_field(tape, metadata, "path"), [] as [tsrx_tape_schema::ValueRef; 0]);
     assert!(!tape.scalar_storage().contains("__OXC_TSRX"));
     assert!(!tape.scalar_storage().contains("OXC_TSRX"));
     assert!(!tape.scalar_storage().contains("/*_t"));

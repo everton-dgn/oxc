@@ -86,7 +86,7 @@ fn overlay_view_exposes_dynamic_style_and_embedded_records_without_copying() {
     let view = overlay.view();
     let repeated = overlay.view();
 
-    assert!(!view.parser_dynamic.is_empty());
+    assert_ne!(view.parser_dynamic, []);
     assert_eq!(view.parser_dynamic.as_ptr(), repeated.parser_dynamic.as_ptr());
     assert_eq!(view.dynamic_tags.len(), 1);
     assert!(!view.dynamic_tags[0].self_closing);
@@ -103,7 +103,7 @@ fn overlay_view_exposes_dynamic_style_and_embedded_records_without_copying() {
 fn parser_view_records_sparse_projected_code_block_boundaries_without_rescanning() {
     let source = "function F() @{ const value=@{ <B/> }; <main>@{ const x=1; <A>{x}</A> }</main> }";
     let ordinary = scan(source).expect("ordinary overlay");
-    assert!(ordinary.view().parser_code_blocks.is_empty());
+    assert_eq!(ordinary.view().parser_code_blocks, []);
 
     let overlay = scan_for_parser(source).expect("parser overlay");
     let view = overlay.view();
@@ -134,7 +134,7 @@ fn projection_view_borrows_affine_segments() {
 
     assert_eq!(view.source.as_ptr(), projection.source().as_ptr());
     assert_eq!(view.segments.as_ptr(), repeated.segments.as_ptr());
-    assert!(!view.segments.is_empty());
+    assert_ne!(view.segments, []);
     let projected_len = u32::try_from(view.source.len()).expect("fixture fits OXC spans");
     assert!(view.segments.iter().all(|segment| {
         segment.projected.start <= segment.projected.end && segment.projected.end <= projected_len

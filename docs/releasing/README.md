@@ -75,7 +75,7 @@ node --test tests/packaging/vite-plus-matrix.test.mjs
 The required CI checks are `.github/workflows/ci.yml`. They cover the two Node
 engine floors, a maintained Node/Rust pair, the locked Rust graph, legal-file
 freshness, package contents, an untouched-tarball install, and the supported
-Vite+ 0.1.24/0.2.4 lanes. The scheduled Vite+ 0.1.20 and OXC-main probes are
+Vite+ 0.3.2/0.3.3 lanes. The scheduled Vite+ 0.1.20 and OXC-main probes are
 advisory; their result cannot replace a required gate.
 
 Run the frozen performance gates on the documented stable benchmark machine:

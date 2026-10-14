@@ -153,7 +153,10 @@ fn speculative_jsx_marks_are_rolled_back() {
 
 #[test]
 fn empty_probe_list_stays_on_the_no_probe_path() {
-    assert!(classify_wtf8_surrogates(b"const value = 1;", &[]).is_empty());
+    assert_eq!(
+        classify_wtf8_surrogates(b"const value = 1;", &[]),
+        [] as [std::option::Option<tsrx_syntax::OpaqueSurrogateContext>; 0]
+    );
 }
 
 #[test]

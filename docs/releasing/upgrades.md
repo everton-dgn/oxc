@@ -20,8 +20,21 @@ As of 2026-09-18, the release candidate is qualified against:
 - official Oxlint 1.83.0;
 - official Oxfmt 0.68.0;
 - `oxlint-tsgolint` 7.0.2002;
-- Vite+ 0.1.24 as the tested minimum supported release; and
-- Vite+ 0.2.4 as the pinned current release (as of the date above).
+- Vite+ 0.3.2 as the tested minimum supported release; and
+- Vite+ 0.3.3 as the pinned current release (raised on 2026-10-14).
+
+Every Vite+ release up to and including 0.3.1 carries the critical advisory
+[GHSA-g8mr-85jm-7xhm](https://github.com/advisories/GHSA-g8mr-85jm-7xhm), so
+0.3.2, the first release without it, is the floor. The supported lanes and the
+clean-install consumer fail on any high or critical `npm audit` finding, which
+keeps an advisory like this one from passing quietly.
+
+Vite+ 1.x is not a supported lane yet. Vite+ 1.2.0 stopped passing the project's
+`vite.config` to Oxlint with `-c`, and the canonical Oxlint this package delegates
+ordinary files to only discovers `vite.config.ts` on its own. In a project with a
+`vite.config.mjs` that uses `overrides`, `extends`, or `ignorePatterns`, the
+ordinary half of `vp lint` would lose those settings. It also requires Node
+22.18 or later, above this package's Node 20.19 floor.
 
 Vite+ 0.1.20 is retained only as an isolated non-blocking Markless compatibility
 control. It has published dependency advisories addressed in later Vite+

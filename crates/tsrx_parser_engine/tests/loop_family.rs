@@ -236,7 +236,7 @@ fn promotes_a_terminal_statement_for_and_empty_to_code_block_render() {
     let function = one_object(&program_body(tape));
     let code_block = object_field(tape, function, "body");
     require_type(tape, code_block, "JSXCodeBlock");
-    assert!(list_field(tape, code_block, "body").is_empty());
+    assert_eq!(list_field(tape, code_block, "body"), [] as [tsrx_tape_schema::ValueRef; 0]);
     let loop_node = object_field(tape, code_block, "render");
     assert_for_head(tape, loop_node, (19, 54), "ForOfStatement", (40, 54), true);
     let body = object_field(tape, loop_node, "body");

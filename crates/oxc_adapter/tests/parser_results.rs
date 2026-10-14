@@ -135,8 +135,8 @@ fn dynamic_import_alone_does_not_claim_module_syntax() {
     assert_eq!(result.parse_count, 1);
     let module = result.module.expect("dynamic-only module table");
     assert!(!module.has_module_syntax());
-    assert!(module.static_imports().is_empty());
-    assert!(module.static_exports().is_empty());
+    assert_eq!(module.static_imports(), []);
+    assert_eq!(module.static_exports(), []);
     assert_eq!(module.dynamic_imports().len(), 1);
 }
 
@@ -276,13 +276,13 @@ fn scanner_failure_metadata_is_one_parse_and_retains_earlier_grammar_evidence_on
         .expect("retained failure metadata");
     assert_eq!(retained.parse_count, 1);
     assert!(!retained.errors.is_empty());
-    assert!(!retained.rejection_module_names.spans().is_empty());
+    assert_ne!(retained.rejection_module_names.spans(), []);
 
     let lean =
         parse_failed_tsrx_metadata(source, RejectionMetadata::None).expect("lean failure metadata");
     assert_eq!(lean.parse_count, 1);
     assert!(lean.errors.is_empty());
-    assert!(lean.rejection_module_names.spans().is_empty());
+    assert_eq!(lean.rejection_module_names.spans(), []);
 }
 
 #[test]

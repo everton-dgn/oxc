@@ -11,7 +11,7 @@ const fixtureRoot = join(root, "tests/fixtures/vite/toolchain");
 const lintBin = process.env.OXC_TSRX_LINT_BIN ?? join(root, "target/release/oxc-tsrx");
 const formatBin = process.env.OXC_TSRX_FORMAT_BIN ?? join(root, "target/release/oxc-tsrx");
 const versions = [
-  { label: "current", packageName: "vite-plus-current", version: "0.2.4" },
+  { label: "current", packageName: "vite-plus-current", version: "0.3.3" },
 ];
 
 function run(command, args, options) {

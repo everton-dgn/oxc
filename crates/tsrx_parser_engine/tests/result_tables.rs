@@ -141,9 +141,9 @@ fn recordless_typescript_module_syntax_preserves_the_pinned_oxc_flag() {
         let result = complete(source);
         let module = result.module.as_ref().expect("module table");
         assert!(module.has_module_syntax(), "recordless module syntax: {source}");
-        assert!(module.static_imports().is_empty());
-        assert!(module.static_exports().is_empty());
-        assert!(module.import_metas().is_empty());
+        assert_eq!(module.static_imports(), []);
+        assert_eq!(module.static_exports(), []);
+        assert_eq!(module.import_metas(), []);
     }
 }
 
@@ -223,7 +223,7 @@ fn fatal_javascript_and_tsrx_grammar_are_returned_as_failed_results() {
                 result.errors.optional_string(error.codeframe).expect("authored grammar codeframe");
             assert!(codeframe.contains("input.tsrx"));
             assert!(codeframe.contains(source));
-            assert!(!result.errors.labels(error.labels).expect("grammar labels").is_empty());
+            assert_ne!(result.errors.labels(error.labels).expect("grammar labels"), []);
         }
     }
 }
